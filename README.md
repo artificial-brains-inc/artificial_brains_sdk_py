@@ -1,7 +1,9 @@
 # ArtificialBrains Python SDK
 
 This repository contains a Python SDK for interacting with the
-Artificial Brains API.  It wraps the REST and realtime endpoints and
+Artificial Brains API. Artificial Brains is the end-to-end platform for building biologically inspired brain for robots, using a new apporach to robotic intelligence based on Spiking Neural Networks, bringing continual learning and edge computing as its main benefits. 
+
+This SDK wraps the REST and realtime endpoints and
 provides helpers for streaming sensor data, decoding neural output
 spikes into robot commands, building feedback rasters and computing
 rewards.  The goal of this SDK is to make it easy for developers to
@@ -20,13 +22,12 @@ protocol.
   commands; includes a ready to use bipolar split decoder
 - **Deviation and reward plugins** for computing error signals and
   global/per‑layer rewards
-- **Feedback raster generator** to build correction spikes from
+- **Feedback error generator** to build correction spikes from
   deviations
-- **Astrocyte modulation** helper mirroring the behaviour of the
-  original learning rule
+- **Reward modulation** helper mirroring biological-brains behaviour around rewards for learning rules
 
 The SDK abstracts away the networking details and allows you to
-concentrate on your control and learning logic.
+focus on your controller and learning logic.
 
 ## Installation
 
@@ -65,7 +66,7 @@ The typical workflow when using this SDK is:
 
    ```python
    from ab_sdk import ABClient
-   client = ABClient("https://brains.example.com/api", api_key="my_secret")
+   client = ABClient("https://artificialbrains.app/api/", api_key="my_secret")
    
    # start a run for project 'robot_arm'
    run = client.start("robot_arm")
