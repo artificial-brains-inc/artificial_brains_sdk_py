@@ -16,5 +16,6 @@ dependencies = [
   "python-dotenv>=1.0",
 ]
 
-[tool.setuptools]
-packages = ["ab_sdk"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ab_sdk*"]
