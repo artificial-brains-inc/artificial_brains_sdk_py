@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "artificialbrains_sdk"
+version = "0.1.0"
+description = "ArtificialBrains Python SDK"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+  "httpx>=0.25",
+  "python-socketio>=5.10",
+  "websocket-client>=1.6",
+  "requests>=2.31",
+  "python-dotenv>=1.0",
+]
+
+[tool.setuptools]
+packages = ["ab_sdk"]
