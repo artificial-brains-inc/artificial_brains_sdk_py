@@ -18,7 +18,8 @@ protocol.
   receiving telemetry at high rates
 - **Input streamer** that automatically responds to server requests for
   sensor data
-- **Decoder plugins** for converting brain output spikes into joint
+- **Generic spike decoders** that convert brain output spikes into
+  actuator deltas using flexible mapping rules and decoding schemes
   commands; includes a ready to use bipolar split decoder
 - **Deviation and reward plugins** for computing error signals and
   global/per‑layer rewards
@@ -108,16 +109,34 @@ The typical workflow when using this SDK is:
    create a control loop:
 
    ```python
-   from ab_sdk import RobotLoop, BipolarSplitDecoder
+   from ab_sdk import RobotLoop
    from ab_sdk.plugins.decoder import MappingEntry
 
    # define how each output population drives a joint
    mapping = [
-       MappingEntry(output_id='V1', joint_index=0, gain=0.5, per_step_max=0.004),
-       MappingEntry(output_id='L1', joint_index=1, gain=0.5, per_step_max=0.004),
-       MappingEntry(output_id='P1', joint_index=-1, gain=1.0, per_step_max=0.001),
+       MappingEntry(
+           node_id="V1",
+           channel="joint:0",
+           scheme="bipolarSplit",
+           per_step_max=0.004,
+           gain=0.5,
+       ),
+       MappingEntry(
+           node_id="L1",
+           channel="joint:1",
+           scheme="bipolarSplit",
+           per_step_max=0.004,
+           gain=0.5,
+       ),
+       MappingEntry(
+           node_id="P1",
+           channel="gripper",
+           scheme="addition",
+           per_step_max=0.001,
+          gain=1.0,
+       ),
    ]
-   decoder = BipolarSplitDecoder(mapping)
+
    run.set_decoder(decoder)
 
    # callback returning the current robot state
@@ -140,7 +159,99 @@ The typical workflow when using this SDK is:
    loop.run_forever()
    ```
 
-4. Optionally implement deviation and reward policies:
+### Decoder model
+
+Decoders in Artificial Brains are **mapping-based and robot-agnostic**.
+
+The brain emits spike activity per output population and timestep.
+The SDK converts this activity into actuator deltas using:
+
+- a **mapping** from output populations to actuator channels
+- a **scheme** defining how spikes become a scalar value
+
+Channel names are arbitrary strings defined by the developer
+(e.g. `"joint:0"`, `"wheel:left"`, `"thruster:z"`, `"gripper"`).
+
+Supported decoding schemes include:
+
+- `bipolarSplit` – difference between first and second half of spikes
+- `addition` – sum of spikes
+- `booleanThreshold` – binary activation based on spike count
+- `bipolarScalar` – {-1, 0, +1} winner-take-all
+
+Multiple output populations may target the same channel; their deltas
+are accumulated per timestep.
+
+The decoder produces **per-timestep actuator deltas**, leaving all
+integration, physics, and control semantics to the user’s controller.
+ 
+ 
+4. (Optional) Sync the project contract and scaffold learning policies:
+
+   ```python
+   client.sync_policies("robot_arm", policies_dir="policies")
+   ```
+
+   This creates reward and deviation policy files that can be customized
+   without risk of being overwritten when the project graph changes.
+
+## Policies & Contracts
+
+Artificial Brains separates **machine-owned contracts** from
+**user-owned learning logic**.
+
+The SDK provides a safe mechanism to scaffold and update learning
+policies without overwriting user code.
+
+### Generated policy structure
+
+When syncing a project contract, the SDK creates a `policies/` directory:
+
+```
+policies/
+├── reward_policy.py              # user-owned (created once, never overwritten)
+├── error_deviation_policy.py     # user-owned (created once, never overwritten)
+├── _contract.json                # machine-owned (always overwritten)
+├── _contract.py                  # machine-owned (always overwritten)
+└── _contract.sha256              # machine-owned (always overwritten)
+```
+
+- **Reward policies** define global and per-STDP3-layer rewards.
+- **Deviation policies** define per-feedback deviation signals over time.
+- **Contract files** expose stable IDs for layers and feedback channels,
+  allowing policies to remain deterministic even when the graph evolves.
+
+### Writing reward policies
+
+Reward policies can return both a global reward and per-layer rewards:
+
+```python
+from policies._contract import STDP3_LAYERS
+
+def compute_reward(summary, *, stdp_layers=STDP3_LAYERS):
+    global_reward = 0.5
+    by_layer = {layer_id: global_reward for layer_id in stdp_layers}
+    return global_reward, by_layer
+```
+
+### Writing deviation policies
+
+Deviation policies emit deviations **per feedback input**:
+
+```python
+from policies._contract import FEEDBACK_IDS
+
+def compute_deviation(feedback_id, *, T, ctx=None):
+    if feedback_id == "fbP1":
+        return [0.0] * T
+    return [0.0] * T
+```
+
+The backend converts deviations into feedback rasters using the previous
+cycle’s feedback as a baseline, making feedback deterministic and stateful
+across cycles.
+
+5. Optionally implement deviation and reward policies:
 
    ```python
    from ab_sdk.plugins.deviation import DefaultDeviation
@@ -155,6 +266,7 @@ The typical workflow when using this SDK is:
 
 Refer to the docstrings in each module for more detailed
 documentation.
+
 
 ## Logging and error handling
 
