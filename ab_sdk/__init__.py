@@ -39,6 +39,9 @@ from .plugins.decoder import (  # noqa: F401
     deltas_to_dq_dg,
 )
 
+# contract + policy scaffolding
+from .contract_scaffold import sync_policies_from_contract  # noqa: F401
+
 # optional defaults (policies)
 from .plugins.deviation import DefaultDeviation  # noqa: F401
 from .plugins.reward import DefaultReward  # noqa: F401
@@ -52,6 +55,8 @@ __all__ = [
     "MappingEntry",
     "decode_stream_rows",
     "deltas_to_dq_dg",
+    # scaffolding
+    "sync_policies_from_contract",
     # policies
     "DefaultDeviation",
     "DefaultReward",

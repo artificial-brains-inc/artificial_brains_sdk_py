@@ -43,3 +43,6 @@ CYCLE_UPDATE_EVENT = "cycle:update"
 
 LEARN_REWARD_EVENT = "learn:reward"
 """Client emits this event with global and per‑layer reward values for STDP3 learning."""
+
+CONTRACT = "/robot/{project_id}/contract"
+"""GET fetch the IO/constants contract without starting a run."""

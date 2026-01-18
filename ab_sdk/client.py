@@ -36,6 +36,7 @@ import socketio
 
 from .run_session import RunSession
 from . import endpoints
+from .contract_scaffold import sync_policies_from_contract
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,39 @@ class ABClient:
         logger.debug("Fetching IO state for project %s", project_id)
         response = self._request("GET", path)
         return response.json()
+    
+    def get_contract(self, project_id: str) -> Dict[str, Any]:
+        """
+        Fetch the IO/constants contract without starting a run.
+
+        Requires your server to implement:
+          GET /api/robot/:project_id/contract
+        returning:
+          { ok: true, projectId, constants: {...}, io: {...} }
+        """
+        if not project_id:
+            raise ValueError("project_id must be provided")
+        path = endpoints.CONTRACT.format(project_id=project_id)
+        logger.debug("Fetching contract for project %s", project_id)
+        response = self._request("GET", path)
+        return response.json()
+
+    def sync_policies(self, project_id: str, *, policies_dir: str = "policies") -> Dict[str, Any]:
+        """
+        One command devs can run whenever they want:
+          - overwrites machine-owned contract files
+          - never overwrites user-owned policy files
+        """
+        contract = self.get_contract(project_id)
+        res = sync_policies_from_contract(contract, policies_dir=policies_dir)
+        return {
+            "ok": True,
+            "policiesDir": res.policies_dir,
+            "sha256": res.sha256,
+            "createdRewardPolicy": res.created_reward_policy,
+            "createdDeviationPolicy": res.created_deviation_policy,
+        }
+
 
     def close(self) -> None:
         self._http.close()
