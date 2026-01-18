@@ -1,159 +1,331 @@
-"""Decoder plugin classes for converting output spikes into robot commands.
+"""
+ab_sdk/plugins/decoder.py
 
-The decoder is responsible for taking the raw spike activity from the
-brain (a dictionary mapping output IDs to matrices of shape
-``gamma × outputN``) and producing a movement command.  This
-command is a dictionary containing at minimum the keys ``dq`` (a
-list of joint deltas) and ``dg`` (gripper delta).  You are free to
-include additional keys to support custom actuators.
+Generic spike decoders: streamed output spikes -> actuator deltas.
 
-To implement your own decoder plugin, subclass
-:class:`BaseDecoder` and override :meth:`decode`.  See
-:class:`BipolarSplitDecoder` for a concrete implementation.
+You provide:
+- outputs: a list of rows like {"t": 190, "id": "V2", "bits": [0,1,0,...]} sent by the brain
+- mapping: how each output population maps to an actuator channel
+- scheme: how spikes become a scalar control signal
+
+This module is robot-agnostic.
+It does NOT assume a fixed number of joints, a gripper, or a specific robot.
+It simply returns "deltas per timestep", keyed by channel name.
+
+---------------------------------------------------------------------------
+Output format (from server)
+---------------------------------------------------------------------------
+
+The brain streams output activity as a list of rows like:
+
+    {"t": 190, "id": "V2", "bits": [0,1,0,...]}
+
+- t: timestep
+- id: output population name
+- bits: 0/1 spikes for that population at that timestep
+
+---------------------------------------------------------------------------
+Mapping format (what you provide)
+---------------------------------------------------------------------------
+
+Each mapping entry connects an output population (row["id"]) to a channel name.
+Channel names are arbitrary strings you choose (e.g. "joint:0", "wheel:left", "thruster:z") based on your robot/sim controller.
+
+Minimum fields per entry:
+
+    {
+      "node_id": "V2",            # matches row["id"]
+      "channel": "joint:3",       # any string identifier for your actuator
+      "scheme": "bipolarSplit",   # see schemes below
+      "per_step_max": 0.003,      # max delta per timestep (units = your choice)
+      "gain": 0.5                 # scale
+    }
+
+Optional:
+- deadzone: float
+- min_step: float
+- invert: bool
+- threshold: int (required only for booleanThreshold)
+- clamp: (min,max) post-scale clamp
+
+If multiple entries target the same channel, their deltas are added.
+
+---------------------------------------------------------------------------
+Schemes (bits -> scalar)
+---------------------------------------------------------------------------
+
+1) "bipolarSplit"
+   value = (sum(first_half) - sum(second_half))
+
+2) "addition"
+   value = sum(bits)
+
+3) "booleanThreshold"
+   value = 1.0 if sum(bits) >= threshold else 0.0
+   Range {0, 1}
+
+4) "bipolarScalar"
+   value = +1.0 if first_half wins
+           -1.0 if second_half wins
+            0.0 if tie
+   Range {-1, 0, +1}
+
+After value is computed:
+    delta = value * per_step_max * gain
+Then we apply optional deadzone/min_step/invert/clamp.
+
+---------------------------------------------------------------------------
+What you get back
+---------------------------------------------------------------------------
+
+A list of commands ordered by timestep:
+
+    [
+      {"t": 188, "deltas": {"joint:0": 0.001, "joint:3": -0.0004}},
+      {"t": 189, "deltas": {"joint:0": 0.0,   "joint:3":  0.0002}},
+      ...
+    ]
+
+Your robot controller applies those deltas to its actuators however it wants.
 """
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-logger = logging.getLogger(__name__)
-
-
-class BaseDecoder:
-    """Abstract base class for decoders.
-
-    Concrete subclasses must override :meth:`decode`.
-    """
-
-    def decode(self, outputs: Dict[str, List[List[int]]], context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Convert output spike matrices into a command dictionary.
-
-        Parameters
-        ----------
-        outputs: dict
-            Mapping from output IDs (strings) to matrices of
-            ``gamma × outputN`` ints.  Each element is either 0 or 1
-            indicating a spike in that timestep at that neuron.
-        context: dict
-            Additional context including the raw telemetry and session.
-
-        Returns
-        -------
-        dict or None
-            A command dictionary containing at least ``dq`` and ``dg``.
-            If `None` is returned then no command is emitted.
-        """
-        raise NotImplementedError
-
-
-class DefaultDecoder(BaseDecoder):
-    """A decoder that generates zero movement.
-
-    This decoder simply returns a command dict with zero deltas and
-    zero gripper movement.  It is useful as a placeholder when you
-    want to record or debug output activity without moving the robot.
-    """
-
-    def decode(self, outputs: Dict[str, List[List[int]]], context: Dict[str, Any]) -> Dict[str, Any]:
-        session = context.get("session")
-        dof = 0
-        # try to infer degrees of freedom from session state; fallback to 0
-        if session is not None:
-            # count unique joints across mappings if mapping is present
-            dof = len(session.io_outputs)  # approximate; user should override
-        return {"dq": [0.0] * dof, "dg": 0.0}
+OutputRow = Dict[str, Any]
+Command = Dict[str, Any]
 
 
 @dataclass
 class MappingEntry:
-    """A single mapping from an output population to a joint channel.
-
-    Attributes
-    ----------
-    output_id: str
-        Identifier of the output node in the brain.
-    joint_index: int
-        Index of the joint that this output controls.
-    gain: float
-        Scalar gain applied to the decoded value.
-    per_step_max: float
-        Maximum magnitude of the step per cycle.  The decoded value is
-        multiplied by this to produce a joint delta.
-    deadzone: float
-        Values whose absolute magnitude is below this threshold are
-        treated as zero.
-    """
-
-    output_id: str
-    joint_index: int
-    gain: float = 1.0
+    node_id: str
+    channel: str
+    scheme: str = "bipolarSplit"  # bipolarSplit | addition | booleanThreshold | bipolarScalar
     per_step_max: float = 0.01
+    gain: float = 1.0
     deadzone: float = 0.0
+    min_step: float = 0.0
+    invert: bool = False
+    threshold: Optional[int] = None                 # for booleanThreshold
+    clamp: Optional[Tuple[float, float]] = None     # optional post-scale clamp
 
 
-class BipolarSplitDecoder(BaseDecoder):
-    """Decode output spikes using a bipolar split scheme.
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
 
-    Each output population is split into two halves.  Spikes in the
-    first half are interpreted as positive contributions; spikes in
-    the second half as negative.  The difference between the counts
-    of positive and negative spikes is normalized by the half size to
-    produce a value in ``[-1,1]``.  This value is then scaled by the
-    mapping entry's gain and per‑step maximum to yield the joint
-    movement.  Values within the deadzone are clipped to zero.
 
-    The decoder is configured with a list of :class:`MappingEntry`
-    objects.  Each entry associates an output ID with a joint index
-    and decoding parameters.  When decode is called, for each entry
-    the corresponding output matrix is looked up in the provided
-    outputs dictionary.  If an entry refers to a non‑existent output
-    ID then it is ignored.
+def _as_bits(bits: Any) -> Optional[List[int]]:
+    if not isinstance(bits, list):
+        return None
+    out: List[int] = []
+    for b in bits:
+        try:
+            out.append(1 if int(b) else 0)
+        except Exception:
+            out.append(0)
+    return out
+
+
+# ----------------------------
+# Schemes: bits -> scalar
+# ----------------------------
+
+def _bipolar_split(bits: List[int]) -> float:
+    n = len(bits)
+    if n < 2:
+        return 0.0
+    half = n // 2
+    if half <= 0:
+        return 0.0
+    pos = sum(bits[:half])
+    neg = sum(bits[half:half * 2])
+    return pos - neg
+
+
+def _addition(bits: List[int]) -> float:
+    n = len(bits)
+    if n <= 0:
+        return 0.0
+    return float(sum(bits)) 
+
+
+def _boolean_threshold(bits: List[int], threshold: int) -> float:
+    n = len(bits)
+    if n <= 0:
+        return 0.0
+    thr = int(threshold)
+    if thr < 1:
+        thr = 1
+    if thr > n:
+        thr = n
+    return 1.0 if sum(bits) >= thr else 0.0
+
+
+def _bipolar_scalar(bits: List[int]) -> float:
+    n = len(bits)
+    if n < 2:
+        return 0.0
+    half = n // 2
+    if half <= 0:
+        return 0.0
+    pos = sum(bits[:half])
+    neg = sum(bits[half:half * 2])
+    if pos > neg:
+        return 1.0
+    if neg > pos:
+        return -1.0
+    return 0.0
+
+
+def _compute_value(bits: List[int], entry: MappingEntry) -> float:
+    scheme = (entry.scheme or "bipolarSplit").strip()
+    if scheme == "bipolarSplit":
+        return _bipolar_split(bits)
+    if scheme == "addition":
+        return _addition(bits)
+    if scheme == "booleanThreshold":
+        thr = entry.threshold
+        if thr is None:
+            thr = max(1, len(bits) // 2)
+        return _boolean_threshold(bits, int(thr))
+    if scheme == "bipolarScalar":
+        return _bipolar_scalar(bits)
+    return 0.0
+
+
+def _value_to_delta(value: float, entry: MappingEntry) -> float:
+    if entry.invert:
+        value = -value
+
+    delta = float(value) * float(entry.per_step_max) * float(entry.gain)
+
+    if entry.deadzone and abs(delta) < float(entry.deadzone):
+        return 0.0
+
+    if entry.min_step and 0.0 < abs(delta) < float(entry.min_step):
+        delta = float(entry.min_step) if delta > 0 else -float(entry.min_step)
+
+    if entry.clamp is not None and isinstance(entry.clamp, (tuple, list)) and len(entry.clamp) == 2:
+        lo, hi = float(entry.clamp[0]), float(entry.clamp[1])
+        delta = _clamp(delta, lo, hi)
+
+    return delta
+
+
+def normalize_mapping(mapping: Iterable[Union[MappingEntry, Dict[str, Any]]]) -> List[MappingEntry]:
+    out: List[MappingEntry] = []
+    for m in mapping:
+        if isinstance(m, MappingEntry):
+            out.append(m)
+            continue
+        if not isinstance(m, dict):
+            continue
+
+        node_id = str(m.get("node_id") or m.get("nodeId") or "")
+        channel = str(m.get("channel") or m.get("controllerChannel") or "")
+        if not node_id or not channel:
+            # channel is required for generic robots
+            continue
+
+        clamp_val = m.get("clamp") or m.get("limits")  # allow "limits" synonym
+        clamp_tuple: Optional[Tuple[float, float]] = None
+        if isinstance(clamp_val, dict) and "min" in clamp_val and "max" in clamp_val:
+            clamp_tuple = (float(clamp_val["min"]), float(clamp_val["max"]))
+        elif isinstance(clamp_val, (list, tuple)) and len(clamp_val) == 2:
+            clamp_tuple = (float(clamp_val[0]), float(clamp_val[1]))
+
+        out.append(
+            MappingEntry(
+                node_id=node_id,
+                channel=channel,
+                scheme=str(m.get("scheme") or "bipolarSplit"),
+                per_step_max=float(
+                    m.get("per_step_max")
+                    if m.get("per_step_max") is not None
+                    else m.get("perStepMax", m.get("perStepMaxRad", 0.01))
+                ),
+                gain=float(m.get("gain", 1.0)),
+                deadzone=float(m.get("deadzone", 0.0)),
+                min_step=float(m.get("min_step") if m.get("min_step") is not None else m.get("minStep", m.get("minStepRad", 0.0))),
+                invert=bool(m.get("invert", False)),
+                threshold=(int(m["threshold"]) if m.get("threshold") is not None else None),
+                clamp=clamp_tuple,
+            )
+        )
+    return out
+
+
+def decode_stream_rows(
+    rows: List[OutputRow],
+    mapping: Iterable[Union[MappingEntry, Dict[str, Any]]],
+) -> List[Command]:
     """
+    Convert streamed output rows into per-timestep actuator deltas.
 
-    def __init__(self, mapping: Iterable[MappingEntry]):
-        self.mapping = list(mapping)
+    Returns:
+        [
+          {"t": 188, "deltas": {"joint:0": 0.0012, "wheel:left": 0.0}},
+          {"t": 189, "deltas": {...}},
+        ]
+    """
+    mp = normalize_mapping(mapping)
 
-    def decode(self, outputs: Dict[str, List[List[int]]], context: Dict[str, Any]) -> Dict[str, Any]:
-        # determine degrees of freedom (max joint index + 1)
-        dof = 0
-        for entry in self.mapping:
-            dof = max(dof, entry.joint_index + 1)
-        dq = [0.0] * dof
-        dg = 0.0
-        for entry in self.mapping:
-            matrix = outputs.get(entry.output_id)
-            if not matrix:
+    # node_id -> mapping entries
+    by_id: Dict[str, List[MappingEntry]] = {}
+    for e in mp:
+        by_id.setdefault(e.node_id, []).append(e)
+
+    # group by timestep (t is source of truth)
+    by_t: Dict[int, List[OutputRow]] = {}
+    for r in rows or []:
+        try:
+            t = int(r.get("t"))
+        except Exception:
+            continue
+        by_t.setdefault(t, []).append(r)
+
+    out_cmds: List[Command] = []
+    for t in sorted(by_t.keys()):
+        deltas: Dict[str, float] = {}
+
+        for r in by_t[t]:
+            out_id = str(r.get("id") or "")
+            if not out_id:
                 continue
-            # compute pos/neg counts across all timesteps
-            N = len(matrix[0]) if matrix else 0
-            if N == 0:
+            entries = by_id.get(out_id)
+            if not entries:
                 continue
-            half = N // 2
-            pos_count = 0
-            neg_count = 0
-            for row in matrix:
-                # ensure row length
-                # count spikes in first half and second half
-                for i, bit in enumerate(row[:half]):
-                    pos_count += 1 if bit else 0
-                for bit in row[half:]:
-                    neg_count += 1 if bit else 0
-            total = pos_count + neg_count
-            if total == 0:
-                value = 0.0
-            else:
-                value = (pos_count - neg_count) / float(max(1, half * len(matrix)))
-            # apply deadzone
-            if abs(value) < entry.deadzone:
-                value = 0.0
-            # apply gain and scale
-            delta = entry.gain * value * entry.per_step_max
-            # accumulate into joint
-            if entry.joint_index == -1:
-                # treat -1 as gripper channel
-                dg += delta
-            else:
-                dq[entry.joint_index] += delta
-        return {"dq": dq, "dg": dg}
+
+            bits = _as_bits(r.get("bits"))
+            if bits is None:
+                continue
+
+            for entry in entries:
+                value = _compute_value(bits, entry)
+                delta = _value_to_delta(value, entry)
+                if delta == 0.0:
+                    continue
+                deltas[entry.channel] = deltas.get(entry.channel, 0.0) + delta
+
+        out_cmds.append({"t": t, "deltas": deltas})
+
+    return out_cmds
+
+
+# Optional convenience: turn channel deltas into dq/dg if your robot uses that pattern
+def deltas_to_dq_dg(deltas: Dict[str, float], *, dof: int, joint_prefix: str = "joint:") -> Dict[str, Any]:
+    dq = [0.0] * int(dof)
+    dg = 0.0
+    for k, v in deltas.items():
+        if k.startswith(joint_prefix):
+            try:
+                idx = int(k.split(":", 1)[1])
+                if 0 <= idx < len(dq):
+                    dq[idx] += float(v)
+            except Exception:
+                continue
+        elif k == "dg" or k == "gripper":
+            dg += float(v)
+    return {"dq": dq, "dg": dg}
