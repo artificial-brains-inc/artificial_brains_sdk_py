@@ -35,7 +35,7 @@ focus on your controller and learning logic.
 ### Install from PyPI (recommended)
 
 ```bash
-pip install artificialbrains_sdk
+pip install artificialbrains-sdk
 ```
 
 This installs the official, versioned ArtificialBrains Python SDK.
