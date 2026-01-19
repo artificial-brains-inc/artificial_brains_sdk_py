@@ -32,6 +32,27 @@ focus on your controller and learning logic.
 
 ## Installation
 
+### Install from PyPI (recommended)
+
+```bash
+pip install artificialbrains_sdk
+```
+
+This installs the official, versioned ArtificialBrains Python SDK.
+
+
+### Install from GitHub
+
+You can also install the SDK directly from GitHub:
+```bash
+pip install git+https://github.com/artificial-brains-inc/artificial_brains_sdk_py.git
+```
+
+To install a specific release:
+```bash
+pip install git+https://github.com/artificial-brains-inc/artificial_brains_sdk_py.git@v0.1.0
+```
+
 ### Requirements
 
 This SDK requires Python **3.8** or newer.  It depends on the
@@ -69,8 +90,8 @@ The typical workflow when using this SDK is:
    from ab_sdk import ABClient
    client = ABClient("https://artificialbrains.app/api/", api_key="my_secret")
    
-   # start a run for project 'robot_arm'
-   run = client.start("robot_arm")
+   # start a run for project 'project_id' -- you'll find it in your project. 
+   run = client.start("rproject_id")
    ```
 
 2. Attach sensor providers and start streaming inputs:
@@ -293,8 +314,43 @@ raised by your callback code are logged with stack traces to aid in
 debugging.  When a deviation or reward plugin returns values outside
 the allowed range the SDK will clamp them to safe defaults.
 
+## License
+ArtificialBrains SDK is source-available.
+
+You may use it freely, including in commercial products.
+You may not repackage it, host it as a service, or use it to build a
+competing platform.
+
+If you want to embed ArtificialBrains into a commercial system, you’re good.
+If you want to clone ArtificialBrains, you’re not.
+
+
+## Elastic License 2.0 (Modified)
+
+Copyright (c) 2026 ArtificialBrains
+
+Permission is hereby granted to use, copy, modify, and distribute this
+software for commercial and non-commercial purposes, subject to the
+limitations below.
+
+You may:
+- Use the software in production
+- Build and sell commercial products that depend on it
+- Modify the software for internal use
+
+You may not:
+- Provide the software as a hosted or managed service
+- Repackage, resell, or sublicense the software itself
+- Use the software to build or offer a competing platform
+- Remove or obscure licensing or attribution notices
+
+This license does not grant rights to use the ArtificialBrains name,
+logo, or trademarks.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+
 ## Contributing
 
-This SDK is a reference implementation.  Feel free to fork it and
-adapt it to your needs.  Please open issues or pull requests if you
+This SDK is a reference implementation. Please open issues or pull requests if you
 find bugs or have suggestions.
