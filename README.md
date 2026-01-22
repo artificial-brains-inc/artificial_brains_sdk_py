@@ -20,11 +20,9 @@ protocol.
   sensor data
 - **Generic spike decoders** that convert brain output spikes into
   actuator deltas using flexible mapping rules and decoding schemes
-  commands; includes a ready to use bipolar split decoder
-- **Deviation and reward plugins** for computing error signals and
-  global/per‑layer rewards
+  commands; includes four ready to use decoders
 - **Feedback error generator** to build correction spikes from
-  deviations
+  deviations (for sensory-motor feedback)
 - **Reward modulation** helper mirroring biological-brains behaviour around rewards for learning rules
 
 The SDK abstracts away the networking details and allows you to
@@ -55,7 +53,7 @@ pip install git+https://github.com/artificial-brains-inc/artificial_brains_sdk_p
 
 ### Requirements
 
-This SDK requires Python **3.8** or newer.  It depends on the
+This SDK requires Python **3.12** or newer.  It depends on the
 following third party libraries:
 
 - [`python‑socketio` ≥ 5.16.0](https://pypi.org/project/python-socketio/), released on
@@ -88,11 +86,24 @@ The typical workflow when using this SDK is:
 
    ```python
    from ab_sdk import ABClient
-   client = ABClient("https://artificialbrains.app/api/", api_key="my_secret")
+   client = ABClient("https://app.artificialbrains.ai/api/", api_key="my_secret")
+   client.sync_policies(PROJECT_ID, policies_dir="policies")
    
    # start a run for project 'project_id' -- you'll find it in your project. 
    run = client.start("rproject_id")
    ```
+
+An .env file for the SDK would need the following information: 
+  ``` python
+  # Copy this file to `.env` and fill in your own values
+  # API key for the Artificial Brains service
+    API_KEY=YOUR_API_KEY
+  # Project identifier to start a run (the backend expects a numeric or string ID) Genesis: 691cb6bc14e402b5ee225c21
+  PROJECT_ID=YOUR_PROJECT_ID
+  # Your namespace and URL (leave them as they are unless you have an assigned environments)
+  SOCKET_NAMESPACE=/ab
+  AB_BASE_URL=https://app.artificialbrains.ai/api
+  ```
 
 2. Attach sensor providers and start streaming inputs:
 
@@ -207,10 +218,10 @@ The decoder produces **per-timestep actuator deltas**, leaving all
 integration, physics, and control semantics to the user’s controller.
  
  
-4. (Optional) Sync the project contract and scaffold learning policies:
+4. (Optional but recommended) Sync the project contract and scaffold learning policies, before initialization:
 
    ```python
-   client.sync_policies("robot_arm", policies_dir="policies")
+   client.sync_policies(PROJECT_ID, policies_dir="policies")
    ```
 
    This creates reward and deviation policy files that can be customized

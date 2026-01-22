@@ -13,7 +13,7 @@ Usage example::
 
     from ab_sdk import ABClient
 
-    client = ABClient("https://brains.example.com/api", api_key="your_key")
+    client = ABClient("https://app.artificialbrains.ai/api", api_key="your_key")
     run = client.start("my_project")
     # ... attach sensors, run loop ...
     client.stop("my_project")
@@ -52,8 +52,7 @@ class ABClient:
 
     Base URL:
       - Provide either:
-          * https://artificialbrains.app/api
-          * http://localhost:3000/api
+          * https://app.artificialbrains.ai/api
         If you pass a host without `/api`, the client will append `/api` automatically.
     """
 
