@@ -74,9 +74,6 @@ python-socketio==5.16.0
 httpx==0.28.1
 ```
 
-After installing dependencies you can include this SDK in your
-project by copying the `ab_sdk` directory into your source tree or
-adding it to your Python path.
 
 ## Quick start
 
