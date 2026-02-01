@@ -20,7 +20,7 @@ appropriate synchronization in your handlers.
 """
 
 from __future__ import annotations
-
+import struct
 import logging
 import threading
 import time
@@ -198,6 +198,64 @@ class RunSession:
         }
         logger.debug("Sending input chunk: %s", {k: payload[k] for k in payload if k != "data"})
         self.socket.emit("io:chunk", payload, namespace=self.namespace)
+    
+    def send_proprioception_ticks(
+        self,
+        input_id: str,
+        raw_tick: float,
+        prev_raw_tick: Optional[float] = None,
+        vel_tick_s: Optional[float] = None,
+        *,
+        cycle: Optional[int] = None,
+        seq: Optional[int] = None,
+        t: Optional[float] = None,
+        lo: Optional[float] = None,
+        hi: Optional[float] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Send a per-joint proprioception sample as RAW ticks (+ optional velocity).
+
+        Payload format:
+          fmt="rawtick_f32x3"
+          data=3x float32 little-endian: [raw_tick, prev_raw_tick, vel_tick_s]
+
+        Notes:
+          - We include cycle in meta for debugging/traceability.
+          - For non-Feedback chunks, the server uses its own brainCycle; the cycle
+            value is still useful for logs and alignment.
+        """
+        if prev_raw_tick is None:
+            prev_raw_tick = float(raw_tick)
+        if vel_tick_s is None:
+            vel_tick_s = 0.0
+
+        payload = struct.pack("<fff", float(raw_tick), float(prev_raw_tick), float(vel_tick_s))
+
+        m = dict(meta or {})
+        if cycle is not None:
+            m.setdefault("cycle", int(cycle))
+        if lo is not None:
+            m.setdefault("lo", float(lo))
+        if hi is not None:
+            m.setdefault("hi", float(hi))
+        m.setdefault("rawTick", float(raw_tick))
+        m.setdefault("prevRawTick", float(prev_raw_tick))
+        m.setdefault("velTickPerS", float(vel_tick_s))
+
+        if seq is None:
+            seq = int(cycle) if cycle is not None else 0
+        if t is None:
+            t = time.time()
+
+        self.send_input_chunk(
+            input_id=str(input_id),
+            kind="Proprioception",
+            seq=int(seq),
+            t=float(t),
+            fmt="rawtick_f32x3",
+            meta=m,
+            data=payload,
+        )
 
     def send_feedback_raster(self, input_id: str, raster: Iterable[float],
                              cycle: int) -> None:
@@ -227,6 +285,7 @@ class RunSession:
                               seq=int(time.time() * 1000),
                               t=time.time(), fmt="raster_f32",
                               meta=meta, data=data_bytes)
+
 
     def send_reward(self, global_reward: float, by_layer: Dict[str, float],
                     cycle: int) -> None:
