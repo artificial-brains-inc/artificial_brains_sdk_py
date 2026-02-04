@@ -122,7 +122,15 @@ class ABClient:
             # derive host root from base_url (/api stripped)
             url = self.base_url[:-4] if self.base_url.endswith("/api") else self.base_url
 
-        socket = socketio.Client(reconnection=True, logger=False, engineio_logger=False)
+        socket = socketio.Client(
+            reconnection=True,
+            reconnection_attempts=0,  # infinite retries
+            reconnection_delay=1,
+            reconnection_delay_max=5,
+            logger=True,              # Enable to see ping/pong
+            engineio_logger=True,
+            request_timeout=3600,      # Allow long requests (1 hour)
+        )
 
         connect_headers: Dict[str, str] = {}
         auth_payload: Optional[Dict[str, Any]] = None
@@ -136,49 +144,23 @@ class ABClient:
          # Helpful visibility: log namespace connect/disconnect
         @socket.on("connect", namespace=ns)
         def _on_connect():
-            logger.info("Realtime connected to namespace %s (namespaces=%s)", ns, list(getattr(socket, "namespaces", {}).keys()))
+            logger.info("Realtime connected to namespace %s", ns)
 
         @socket.on("disconnect", namespace=ns)
         def _on_disconnect():
             logger.warning("Realtime disconnected from namespace %s", ns)
 
-        # Robust connect strategy:
-        #  1) Try websocket-only (does NOT require `requests`)
-        #  2) Fallback to default transports (polling+websocket) if needed
-        # Provide a clear error message if dependencies are missing.
-        try:
-            socket.connect(
-                url,
-                headers=connect_headers,
-                auth=auth_payload,
-                namespaces=[ns],
-                transports=["websocket"],
-                wait=True,
-                wait_timeout=self.timeout,
-            )
-        except Exception as e1:
-            # If websocket-client is missing, python-socketio will fail here.
-            # If polling is needed and `requests` is missing, it will fail on fallback.
-            try:
-                socket.connect(
-                    url,
-                    headers=connect_headers,
-                    auth=auth_payload,
-                    namespaces=[ns],
-                    wait=True,
-                    wait_timeout=self.timeout,
-                )
-            except Exception as e2:
-                msg = (
-                    "Realtime connection failed.\n\n"
-                    "Tried websocket-only then default transports.\n\n"
-                    "Common fixes:\n"
-                    "  - pip install websocket-client\n"
-                    "  - pip install requests\n\n"
-                    f"websocket error: {e1}\n"
-                    f"fallback error: {e2}"
-                )
-                raise socketio.exceptions.ConnectionError(msg)
+        # Use polling + websocket (not websocket-only)
+        # This maintains connection through NAT devices
+        socket.connect(
+            url,
+            headers=connect_headers,
+            auth=auth_payload,
+            namespaces=[ns],
+            transports=["polling", "websocket"],  # MUST have polling first!
+            wait=True,
+            wait_timeout=120,
+        )
             
 
         # HARD ASSERT: the namespace must actually be connected, or emits will fail with:
