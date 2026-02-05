@@ -127,8 +127,8 @@ class ABClient:
             reconnection_attempts=0,  # infinite retries
             reconnection_delay=1,
             reconnection_delay_max=5,
-            logger=True,              # Enable to see ping/pong
-            engineio_logger=True,
+            logger=False,              # Enable to see ping/pong
+            engineio_logger=False,
             request_timeout=3600,      # Allow long requests (1 hour)
         )
 
@@ -157,7 +157,7 @@ class ABClient:
             headers=connect_headers,
             auth=auth_payload,
             namespaces=[ns],
-            transports=["polling", "websocket"],  # MUST have polling first!
+            transports=["websocket"],
             wait=True,
             wait_timeout=120,
         )
