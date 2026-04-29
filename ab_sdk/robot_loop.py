@@ -1,184 +1,320 @@
-"""High level loop for controlling a robot during a run.
-
-The :class:`RobotLoop` coordinates sending the robot's observed state to
-the server, decoding the output spikes returned from the brain and
-applying the resulting command to your hardware.  It integrates with
-the :class:`~ab_sdk.run_session.RunSession` lifecycle and uses
-callbacks supplied by the user for state acquisition and command
-execution.
-
-Example usage::
-
-    def get_robot_state():
-        return { 'q': current_joint_positions(), 'dq': current_joint_vels(), 'grip': {'pos': gripper_pos}, 'dt': dt }
-
-    def apply_command(cmd):
-        set_joint_targets(cmd['dq'])
-        set_gripper(cmd['dg'])
-
-    loop = RobotLoop(session, state_provider=get_robot_state, command_executor=apply_command)
-    loop.run_forever()
-
-In this example the brain's decoded commands are applied directly to a
-hardware or simulated robot.  If you are still letting the server
-generate ``robot:cmd`` events then you can omit the decoder plugin
-and use the command handler registered on the session instead.
-"""
+# ab_sdk/robot_loop.py
 
 from __future__ import annotations
 
-import logging
+import sys
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Mapping, Optional
 
-from .run_session import RunSession
+from .session import RealtimeSession
 
-logger = logging.getLogger(__name__)
+
+@dataclass
+class RewardPayload:
+    """Reward payload returned by the controller.
+
+    The controller computes rewards.
+    The SDK validates/routs them through the session.
+
+    Accepted shape:
+        RewardPayload(
+            global_reward=0.5,
+            local_rewards={"on_line": 1.0, "avoid_obstacle": 0.25},
+            meta={"source": "epuck"}
+        )
+
+    Equivalent dict form also accepted by RobotLoop:
+        {
+            "global": 0.5,
+            "local": {"on_line": 1.0},
+            "meta": {...}
+        }
+    """
+
+    global_reward: Optional[float] = None
+    local_rewards: dict[str, float] = field(default_factory=dict)
+    meta: Optional[dict[str, Any]] = None
 
 
 class RobotLoop:
-    """Manage the control loop for a robot.
+    """SDK-managed robot loop for robots / Webots controllers.
 
-    The loop periodically collects the robot's current state and sends
-    it to the server via the session's realtime channel.  When cycle
-    update events arrive the associated decoder plugin (if attached) is
-    invoked to produce a command which is then passed to the
-    user‑supplied command executor.
+    Boundary:
+    - controller owns robot logic:
+        * collect inputs
+        * apply outputs
+        * calculate rewards
+    - SDK owns:
+        * scheduling
+        * publishing inputs
+        * publishing rewards
+        * command callback wiring
 
-    Parameters
-    ----------
-    session: RunSession
-        The active run session to which robot states and commands should
-        be associated.
-    state_provider: Callable[[], Dict[str, Any]]
-        A callback returning the current robot state.  This should
-        return a dictionary with keys ``q`` (joint positions), ``dq``
-        (joint velocities), ``grip`` (dict with ``pos``) and ``dt``
-        (time delta since last call).  All fields are optional;
-        missing values are simply omitted from the state payload.  The
-        provider is invoked on a background thread at the configured
-        tick frequency.
-    command_executor: Callable[[Dict[str, Any]], None]
-        A callback invoked with a command dictionary returned by the
-        decoder plugin.  The dictionary has keys ``dq`` (array of
-        joint deltas), ``dg`` (scalar gripper command) and any
-        additional keys defined by your decoder.  This callback should
-        apply the command to the actual robot.
-    tick_hz: float, optional
-        The frequency in Hz at which to send robot states to the
-        server.  Defaults to 20Hz.  Set to 0 to disable periodic
-        sending (state must then be sent manually).
+    `state_provider` returns:
+        {
+            "camera": ...,
+            "proprioception": ...,
+        }
+
+    or per-sensor config dicts:
+        {
+            "ps0": {
+                "signal": 1234.0,
+                "mode": "positive_scalar_population",
+                "vmax": 4095.0,
+                "radius": 1,
+            }
+        }
+
+    Keys are expected to match names in session.input_map.by_sensor.
+
+    `reward_provider` returns one of:
+        - None
+        - RewardPayload(...)
+        - {
+              "global": 0.2,
+              "local": {"on_line": 1.0},
+              "meta": {...}
+          }
+
+    Unknown sensors / local rewards can either raise or be skipped,
+    depending on `strict`.
     """
 
-    def __init__(self, session: RunSession,
-                 state_provider: Callable[[], Dict[str, Any]],
-                 command_executor: Callable[[Dict[str, Any]], None],
-                 tick_hz: float = 20.0) -> None:
+    def __init__(
+        self,
+        session: RealtimeSession,
+        *,
+        state_provider: Callable[[], Mapping[str, Any]],
+        sensor_providers: Optional[Mapping[str, Callable[[], Any]]] = None,
+        input_mode: str = "batch",
+        reward_provider: Optional[Callable[[], Any]] = None,
+        command_executor: Optional[Callable[[Any], None]] = None,
+        tick_hz: float = 20.0,
+        encoder_mode: str = "vector_f32",
+        strict: bool = True,
+        auto_register_command_handler: bool = True,
+    ) -> None:
         self.session = session
         self.state_provider = state_provider
+        self.sensor_providers = dict(sensor_providers or {})
+        self.input_mode = input_mode
+        self.reward_provider = reward_provider
         self.command_executor = command_executor
         self.tick_hz = tick_hz
+        self.encoder_mode = encoder_mode
+        self.strict = strict
+
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        # register to receive cycle updates and decode commands
-        self.session.on_cycle_update(self._on_cycle_update)
+        self._input_threads: list[threading.Thread] = []
+        self._reward_thread: Optional[threading.Thread] = None
 
-    def _on_cycle_update(self, telemetry: Dict[str, Any]) -> None:
-        """Handle cycle update events by decoding commands and applying them.
+        if command_executor and auto_register_command_handler:
+            self.session.on_command(command_executor)
 
-        If a decoder plugin is attached to the session then this
-        callback will build a dictionary of output matrices keyed by
-        output ID and invoke the plugin's ``decode`` method.  The
-        resulting command dictionary is passed to the supplied
-        ``command_executor``.  Any exceptions raised by the decoder
-        are caught and logged; command execution is skipped on error.
-        """
-        decoder = self.session.decoder_plugin
-        if decoder is None:
-            # nothing to do; maybe server will send robot:cmd
-            return
-        outputs = telemetry.get("outputs", [])
-        # build a mapping from output id to matrix (gamma x outputN)
-        output_matrices: Dict[str, List[List[int]]] = {}
-        for entry in outputs:
-            try:
-                t_step, out_id, bits = entry
-            except ValueError:
-                continue
-            if out_id not in output_matrices:
-                # initialize matrix with zeros
-                output_matrices[out_id] = [[0] * self.session.output_n for _ in range(self.session.gamma)]
-            # assign row
-            row = output_matrices[out_id][int(t_step)]
-            # bits may be shorter than output_n; pad
-            for i in range(min(len(bits), self.session.output_n)):
-                row[i] = 1 if bits[i] else 0
-        try:
-            command = decoder.decode(output_matrices, context={
-                "telemetry": telemetry,
-                "session": self.session,
-            })
-            if command is not None:
-                logger.debug("Decoded command: %s", command)
-                self.command_executor(command)
-        except Exception as exc:
-            logger.exception("Decoder error: %s", exc)
-
-    def _send_robot_state(self) -> None:
-        """Collect the current robot state and emit it to the server."""
-        try:
-            state = self.state_provider() or {}
-            payload = {"runId": self.session.run_id, "state": state}
-            self.session.socket.emit("robot:state", payload, namespace=self.session.namespace)
-            logger.debug("Sent robot state: %s", payload)
-        except Exception as exc:
-            logger.exception("Error collecting or sending robot state: %s", exc)
-
-    def run_forever(self) -> None:
-        """Start the control loop and block until stopped.
-
-        This method spawns a background thread which periodically
-        acquires robot state and sends it to the server.  It then
-        blocks on the main thread, sleeping indefinitely.  To stop the
-        loop call :meth:`stop` from another thread or signal handler.
-        """
+    def start(self) -> None:
         if self._running:
-            logger.warning("RobotLoop.run_forever() called while already running")
             return
         self._running = True
-        if self.tick_hz > 0:
-            interval = 1.0 / float(self.tick_hz)
+        if self.input_mode == "parallel":
+            self._start_parallel_inputs()
+            self._start_reward_loop()
         else:
-            interval = 0.0
-        # define worker function
-        def _worker() -> None:
-            while self._running:
-                if interval > 0:
-                    start = time.time()
-                    self._send_robot_state()
-                    elapsed = time.time() - start
-                    sleep_time = max(0.0, interval - elapsed)
-                    time.sleep(sleep_time)
-                else:
-                    time.sleep(0.1)
-        # start worker thread
-        self._thread = threading.Thread(target=_worker, name="RobotLoopWorker")
-        self._thread.daemon = True
-        self._thread.start()
-        logger.info("Robot loop started")
+            self._thread = threading.Thread(
+                target=self._worker,
+                daemon=True,
+                name=f"RobotLoop:{self.session.compile_id}",
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        for thread in self._input_threads:
+            if thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+        self._input_threads = []
+
+        if self._reward_thread:
+            if self._reward_thread is not threading.current_thread():
+                self._reward_thread.join(timeout=2.0)
+            self._reward_thread = None
+            
+        if self._thread:
+            if self._thread is not threading.current_thread():
+                self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def run_forever(self) -> None:
+        self.start()
         try:
             while self._running:
-                time.sleep(1)
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            pass
         finally:
             self.stop()
 
-    def stop(self) -> None:
-        """Stop the control loop."""
-        if not self._running:
+    def _worker(self) -> None:
+        interval = 1.0 / self.tick_hz if self.tick_hz > 0 else 0.05
+
+        try:
+            while self._running:
+                started = time.time()
+
+                self._publish_inputs()
+                self._publish_rewards()
+
+                elapsed = time.time() - started
+                time.sleep(max(0.0, interval - elapsed))
+        except Exception as exc:
+            self._running = False
+            print(f"[AB] RobotLoop crashed: {exc}", file=sys.stderr)
+            try:
+                self.session.stop(notify_node=True)
+            except Exception as stop_exc:
+                print(
+                    f"[AB] failed to stop session after RobotLoop crash: {stop_exc}",
+                    file=sys.stderr,
+                )
+            raise
+
+    def _publish_inputs(self) -> None:
+        payload = self.state_provider() or {}
+        if not isinstance(payload, Mapping):
+            raise TypeError("state_provider must return a mapping of sensor -> signal")
+
+        known_sensors = self.session.input_map.by_sensor
+
+        for sensor, signal in payload.items():
+            self._publish_one_input(sensor, signal)
+
+    def _publish_rewards(self) -> None:
+        if self.reward_provider is None:
             return
-        self._running = False
-        logger.info("Stopping robot loop")
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
-            self._thread = None
+
+        raw = self.reward_provider()
+        if raw is None:
+            return
+
+        reward = self._normalize_reward_payload(raw)
+
+        if reward.global_reward is not None:
+            self.session.send_global_reward(
+                float(reward.global_reward),
+                meta=reward.meta,
+            )
+
+        if reward.local_rewards:
+            routed: dict[str, float] = {}
+
+            for from_output, value in reward.local_rewards.items():
+                bindings = self.session.reward_map.get_by_output(from_output)
+
+                if not bindings:
+                    if self.strict:
+                        raise KeyError(f"unknown local reward output '{from_output}'")
+                    continue
+
+                routed[str(from_output)] = float(value)
+
+            if routed:
+                self.session.send_local_rewards(routed, meta=reward.meta)
+
+    def _start_parallel_inputs(self) -> None:
+        if not self.sensor_providers:
+            raise ValueError(
+                "input_mode='parallel' requires sensor_providers={sensor: callable}"
+            )
+
+        for sensor, provider in self.sensor_providers.items():
+            if sensor not in self.session.input_map.by_sensor:
+                if self.strict:
+                    raise KeyError(f"unknown sensor '{sensor}'")
+                continue
+
+            thread = threading.Thread(
+                target=self._sensor_worker,
+                args=(sensor, provider),
+                daemon=True,
+                name=f"ABSensor:{sensor}",
+            )
+            self._input_threads.append(thread)
+            thread.start()
+
+
+    def _start_reward_loop(self) -> None:
+        if self.reward_provider is None:
+            return
+
+        self._reward_thread = threading.Thread(
+            target=self._reward_worker,
+            daemon=True,
+            name=f"ABRewards:{self.session.compile_id}",
+        )
+        self._reward_thread.start()
+
+
+    def _sensor_worker(self, sensor: str, provider: Callable[[], Any]) -> None:
+        interval = 1.0 / self.tick_hz if self.tick_hz > 0 else 0.05
+
+        while self._running:
+            started = time.time()
+
+            signal = provider()
+            self._publish_one_input(sensor, signal)
+
+            elapsed = time.time() - started
+            time.sleep(max(0.0, interval - elapsed))
+
+
+    def _reward_worker(self) -> None:
+        interval = 1.0 / self.tick_hz if self.tick_hz > 0 else 0.05
+
+        while self._running:
+            started = time.time()
+
+            self._publish_rewards()
+
+            elapsed = time.time() - started
+            time.sleep(max(0.0, interval - elapsed))
+
+
+    def _publish_one_input(self, sensor: str, signal: Any) -> None:
+        if sensor not in self.session.input_map.by_sensor:
+            if self.strict:
+                raise KeyError(f"unknown sensor '{sensor}'")
+            return
+
+        if isinstance(signal, Mapping):
+            self.session.publish_input(
+                sensor,
+                signal.get("signal"),
+                mode=signal.get("mode", self.encoder_mode),
+                vmax=signal.get("vmax"),
+                vmin=signal.get("vmin"),
+                absmax=signal.get("absmax"),
+                radius=int(signal.get("radius", 1)),
+                meta=signal.get("meta"),
+            )
+        else:
+            self.session.publish_input(sensor, signal, mode=self.encoder_mode)
+
+    @staticmethod
+    def _normalize_reward_payload(payload: Any) -> RewardPayload:
+        if isinstance(payload, RewardPayload):
+            return payload
+
+        if isinstance(payload, Mapping):
+            return RewardPayload(
+                global_reward=payload.get("global"),
+                local_rewards=dict(payload.get("local") or {}),
+                meta=payload.get("meta"),
+            )
+
+        raise TypeError(
+            "reward_provider must return None, RewardPayload, or a mapping "
+            "with keys: global, local, meta"
+        )
