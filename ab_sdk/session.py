@@ -15,6 +15,7 @@ class SessionConfig:
     telemetry: bool = True
     poll_interval: float = 0.05
     output_limit: int = 100
+    checkpoint_every_ticks: int = 250
 
 
 class RealtimeSession:
@@ -51,9 +52,16 @@ class RealtimeSession:
         self._command_handlers: list[Callable[[Any], None]] = []
         self._control_handlers: list[Callable[[Dict[str, Any]], None]] = []
         self._running = False
+        self._last_checkpoint_step = -1
+        self._checkpoint_every_steps = int(config.checkpoint_every_ticks or 250)
 
         self.output_stream.on_item(self._dispatch_output)
         self.output_stream.on_control(self._dispatch_control)
+
+        print(
+            f"[AB][CHECKPOINT] enabled every {self._checkpoint_every_steps} output steps",
+            flush=True,
+        )
 
     def set_decoder(self, decoder: Any) -> None:
         self.decoder = decoder
@@ -131,6 +139,12 @@ class RealtimeSession:
         if not self._running:
             return
         self._running = False
+        
+        try:
+            self.checkpoint(reason="final")
+        except Exception as exc:
+            print(f"[AB][CHECKPOINT][FINAL][ERROR] {exc}", flush=True)
+
         self.python_client.run_stop(self.compile_id)
         self.output_stream.stop()
         if notify_node and self.config.telemetry and self.node_client and self.project_id:
@@ -140,6 +154,12 @@ class RealtimeSession:
         if not self._running:
             return
         self._running = False
+
+        try:
+            self.checkpoint(reason="final")
+        except Exception as exc:
+            print(f"[AB][CHECKPOINT][FINAL][ERROR] {exc}", flush=True)
+
         self.output_stream.stop()
         if notify_node and self.config.telemetry and self.node_client and self.project_id:
             self.node_client.sdk_run_stopped(self.project_id, self.compile_id)
@@ -148,6 +168,8 @@ class RealtimeSession:
     def _dispatch_output(self, item: Dict[str, Any]) -> None:
         for handler in list(self._output_handlers):
             handler(item)
+
+        self._maybe_checkpoint_from_output(item)
 
         if self.decoder is None:
             return
@@ -175,3 +197,72 @@ class RealtimeSession:
     
     def on_control(self, handler: Callable[[Dict[str, Any]], None]) -> None:
         self._control_handlers.append(handler)
+    
+    def checkpoint(self, *, reason: str = "periodic") -> Optional[Dict[str, Any]]:
+        if not self.node_client or not self.project_id:
+            print("[AB][CHECKPOINT] skipped: missing node_client/project_id", flush=True)
+            return None
+
+        if reason == "final":
+            try:
+                payload = self.python_client.get_outputs(
+                    compile_id=self.compile_id,
+                    after_step=self.output_stream.after_step,
+                    limit=100,
+                )
+                items = payload.get("items") or []
+                if items:
+                    self.output_stream.latest_item = items[-1]
+                    self.output_stream.after_step = payload.get(
+                        "next_after_step",
+                        self.output_stream.after_step,
+                    )
+            except Exception as exc:
+                print(f"[AB][CHECKPOINT][FINAL][REFRESH_ERROR] {exc}", flush=True)
+
+        item = self.output_stream.latest_item
+        if not item:
+            print("[AB][CHECKPOINT] skipped: no latest output item", flush=True)
+            return None
+        
+        weights = item.get("weights") or []
+        
+        payload = {
+            "compileId": self.compile_id,
+            "projectId": self.project_id,
+            "reason": reason,
+            "step": item.get("step"),
+            "weights": weights,
+        }
+
+        print(
+            f"[AB][CHECKPOINT] sending reason={reason} step={payload.get('step')}",
+            flush=True,
+        )
+
+        result = self.node_client.checkpoint(self.project_id, payload)
+        print(f"[AB][CHECKPOINT] sent ok result={result}", flush=True)
+        return result
+    
+    def _maybe_checkpoint_from_output(self, item: Dict[str, Any]) -> None:
+        if self._checkpoint_every_steps <= 0:
+            return
+
+        try:
+            step = int(item.get("step", -1))
+        except Exception:
+            return
+
+        if step <= 0:
+            return
+
+        if step - self._last_checkpoint_step < self._checkpoint_every_steps:
+            return
+
+        self._last_checkpoint_step = step
+
+        try:
+            print(f"[AB][CHECKPOINT] output_step={step}", flush=True)
+            self.checkpoint(reason="periodic")
+        except Exception as exc:
+            print(f"[AB][CHECKPOINT][ERROR] {exc}", flush=True)

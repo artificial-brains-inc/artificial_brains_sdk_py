@@ -6,6 +6,8 @@ NODE_TELEMETRY_START = "/robots/realtime/{project_id}/telemetry"
 NODE_RUN_STOP = "/robots/realtime/{project_id}/run-stop"
 NODE_SDK_RUN_STOPPED = "/robots/realtime/{project_id}/sdk-run-stopped"
 NODE_SESSION = "/robots/realtime/{project_id}/session/{compile_id}"
+NODE_WEBOTS_CREDENTIALS = "/robots/webots/{project_id}/get-credentials"
+NODE_CHECKPOINT = "/robots/realtime/{project_id}/checkpoint"
 
 # Python runtime
 PY_COMPILE = "/compile"

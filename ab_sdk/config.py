@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import httpx
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -18,6 +19,46 @@ def load_env_file(path: Path) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         os.environ.setdefault(key, value)
+
+def hydrate_env_from_webots_temp_token() -> None:
+    project_id = os.getenv("AB_PROJECT_ID")
+    temp_token = os.getenv("AB_TEMP_TOKEN")
+    node_url = os.getenv("AB_NODE_URL")
+
+    if not project_id or not temp_token:
+        return
+
+    if os.getenv("AB_API_KEY") and os.getenv("AB_PYTHON_URL"):
+        return
+
+    if not node_url:
+        node_url = "https://app.artificialbrains.ai/api"
+        os.environ.setdefault("AB_NODE_URL", node_url)
+
+    url = (
+        node_url.rstrip("/")
+        + f"/robots/webots/{project_id}/get-credentials"
+    )
+
+    resp = httpx.post(
+        url,
+        json={
+            "projectId": project_id,
+            "tempToken": temp_token,
+        },
+        headers={
+            "x-temp-token": temp_token,
+        },
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    credentials = payload.get("credentials") or {}
+
+    for key, value in credentials.items():
+        if value is not None:
+            os.environ[key] = str(value)
 
 
 @dataclass
@@ -43,6 +84,8 @@ class SDKConfig:
     ) -> "SDKConfig":
         if env_path is not None:
             load_env_file(Path(env_path))
+
+        hydrate_env_from_webots_temp_token()
 
         project_id = os.getenv("AB_PROJECT_ID")
         python_url = os.getenv("AB_PYTHON_URL")

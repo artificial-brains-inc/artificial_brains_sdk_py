@@ -132,10 +132,13 @@ class ABClient:
                 init_payload=init_payload,
             )
 
-            port = init_payload["port"]
+            python_url = init_payload.get("pythonUrl")
+            if not python_url:
+                port = init_payload["port"]
+                python_url = f"http://127.0.0.1:{port}"
 
             self.python = PythonRealtimeClient(
-                f"http://127.0.0.1:{port}",
+                python_url,
                 api_key=os.getenv("AB_API_KEY"),
                 timeout=10.0,
             )
@@ -159,6 +162,7 @@ class ABClient:
                 telemetry=telemetry,
                 poll_interval=self.output_poll_interval,
                 output_limit=self.output_limit,
+                checkpoint_every_ticks=250,
             ),
         )
         session.start_output_stream()

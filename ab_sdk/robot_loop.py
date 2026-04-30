@@ -96,6 +96,7 @@ class RobotLoop:
         encoder_mode: str = "vector_f32",
         strict: bool = True,
         auto_register_command_handler: bool = True,
+        checkpoint_every_ticks: int = 500,
     ) -> None:
         self.session = session
         self.state_provider = state_provider
@@ -106,6 +107,8 @@ class RobotLoop:
         self.tick_hz = tick_hz
         self.encoder_mode = encoder_mode
         self.strict = strict
+        self.checkpoint_every_ticks = int(checkpoint_every_ticks or 0)
+        self._tick_count = 0
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -301,6 +304,7 @@ class RobotLoop:
             )
         else:
             self.session.publish_input(sensor, signal, mode=self.encoder_mode)
+
 
     @staticmethod
     def _normalize_reward_payload(payload: Any) -> RewardPayload:

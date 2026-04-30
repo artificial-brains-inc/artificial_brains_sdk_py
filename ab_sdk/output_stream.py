@@ -32,6 +32,7 @@ class OutputStream:
         self.after_step: Optional[int] = None
         self._handlers: List[Callable[[Dict], None]] = []
         self._control_handlers: List[Callable[[Dict], None]] = []
+        self.latest_item: Optional[Dict] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
@@ -76,6 +77,7 @@ class OutputStream:
             if items:
                 self.after_step = payload.get("next_after_step")
                 for item in items:
+                    self.latest_item = item
                     for handler in list(self._handlers):
                         handler(item)
             time.sleep(self.poll_interval)
