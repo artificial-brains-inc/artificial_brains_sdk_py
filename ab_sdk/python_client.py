@@ -10,11 +10,20 @@ from . import endpoints
 
 
 class PythonRealtimeClient:
-    def __init__(self, base_url: str, *, api_key: Optional[str] = None, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        api_key: Optional[str] = None,
+        project_id: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> None:
         if not base_url:
             raise ValueError("python base_url must be provided")
         self.base_url = base_url.rstrip("/")
         headers: Dict[str, str] = {}
+        if project_id:
+            headers["x-project-id"] = project_id
         if api_key:
             headers["x-api-key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
@@ -113,6 +122,23 @@ class PythonRealtimeClient:
                 "after_step": after_step,
                 "keys": list(payload.keys()),
                 "control": payload.get("control"),
+            },
+            flush=True,
+        )
+        return payload
+    
+    def get_weights(self, *, compile_id: str) -> Dict[str, Any]:
+        path = endpoints.PY_WEIGHTS.format(compile_id=compile_id)
+        resp = self.http.get(path)
+        resp.raise_for_status()
+        payload = resp.json()
+        print(
+            "[AB][GET_WEIGHTS]",
+            {
+                "base_url": self.base_url,
+                "compile_id": compile_id,
+                "step": payload.get("step"),
+                "has_weights": bool(payload.get("weights")),
             },
             flush=True,
         )

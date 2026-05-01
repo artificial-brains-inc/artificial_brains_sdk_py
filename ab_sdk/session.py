@@ -220,18 +220,22 @@ class RealtimeSession:
             except Exception as exc:
                 print(f"[AB][CHECKPOINT][FINAL][REFRESH_ERROR] {exc}", flush=True)
 
-        item = self.output_stream.latest_item
-        if not item:
-            print("[AB][CHECKPOINT] skipped: no latest output item", flush=True)
+        weights_payload = self.python_client.get_weights(
+            compile_id=self.compile_id,
+        )
+
+        step = weights_payload.get("step")
+        weights = weights_payload.get("weights") or []
+
+        if not weights:
+            print("[AB][CHECKPOINT] skipped: no weights available", flush=True)
             return None
-        
-        weights = item.get("weights") or []
-        
+       
         payload = {
             "compileId": self.compile_id,
             "projectId": self.project_id,
             "reason": reason,
-            "step": item.get("step"),
+            "step": step,
             "weights": weights,
         }
 

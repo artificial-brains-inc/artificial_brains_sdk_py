@@ -50,7 +50,12 @@ class ABClient:
             raise ValueError("ABClient requires an API key. Pass api_key or set AB_API_KEY.")
 
         self.node = NodeRealtimeClient(node_url, api_key=api_key, timeout=timeout) if node_url else None
-        self.python = PythonRealtimeClient(python_url, api_key=api_key, timeout=timeout)
+        self.python = PythonRealtimeClient(
+            python_url,
+            api_key=api_key,
+            project_id=os.getenv("AB_PROJECT_ID"),
+            timeout=timeout,
+        )
         self.output_poll_interval = output_poll_interval
         self.output_limit = output_limit
 
@@ -140,6 +145,7 @@ class ABClient:
             self.python = PythonRealtimeClient(
                 python_url,
                 api_key=os.getenv("AB_API_KEY"),
+                project_id=project_id,
                 timeout=10.0,
             )
 
