@@ -81,14 +81,22 @@ class PythonRealtimeClient:
         resp.raise_for_status()
         return resp.json()
 
-    def send_global_reward(self, *, compile_id: str, value: float, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def send_global_reward(
+        self,
+        *,
+        compile_id: str,
+        value: float,
+        drive: Optional[float] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         payload = {
             "compileId": compile_id,
             "scope": "global",
             "value": float(value),
+            "drive": float(drive) if drive is not None else None,
             "meta": meta or {},
         }
-        print("[AB][SEND_LOCAL_REWARD]", payload, flush=True)
+        print("[AB][SEND_GLOBAL_REWARD]", payload, flush=True)
         resp = self.http.post(endpoints.PY_REWARDS, json=payload)
         resp.raise_for_status()
         return resp.json()
@@ -118,6 +126,39 @@ class PythonRealtimeClient:
             resp.raise_for_status()
             results.append(resp.json())
         return {"ok": True, "results": results}
+
+    def send_local_rewards_batch(
+        self,
+        *,
+        compile_id: str,
+        rewards: Dict[str, Any],
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "compileId": compile_id,
+            "items": [
+                {
+                    "scope": "local",
+                    "target": str(target),
+                    "value": float(
+                        value.get("value") if isinstance(value, dict) else value
+                    ),
+                    "drive": (
+                        float(value.get("drive"))
+                        if isinstance(value, dict) and value.get("drive") is not None
+                        else None
+                    ),
+                    "meta": meta or {},
+                }
+                for target, value in rewards.items()
+            ],
+        }
+
+        print("[AB][SEND_LOCAL_REWARDS_BATCH]", payload, flush=True)
+
+        resp = self.http.post(endpoints.PY_REWARDS, json=payload)
+        resp.raise_for_status()
+        return resp.json()
 
     def get_outputs(self, *, compile_id: str, after_step: Optional[int] = None, limit: int = 100) -> Dict[str, Any]:
         params: Dict[str, Any] = {"limit": limit}

@@ -104,21 +104,48 @@ class RealtimeSession:
         )
         return self.python_client.send_input(payload=payload)
 
-    def send_global_reward(self, value: float, *, meta: Optional[dict] = None) -> Dict[str, Any]:
+    def send_global_reward(
+        self,
+        value: float,
+        *,
+        drive: Optional[float] = None,
+        meta: Optional[dict] = None,
+    ) -> Dict[str, Any]:
+        if drive is None:
+            drive = 1.0
+        else:
+            drive = 1.0 if float(drive) >= 0.0 else -1.0
+
         return self.python_client.send_global_reward(
             compile_id=self.compile_id,
             value=value,
+            drive=drive,
             meta=meta,
         )
 
-    def send_local_reward(self, name: str, value: float, *, meta: Optional[dict] = None) -> Dict[str, Any]:
+    def send_local_reward(
+        self,
+        name: str,
+        value: float,
+        *,
+        drive: Optional[float] = None,
+        meta: Optional[dict] = None,
+    ) -> Dict[str, Any]:
         return self.send_local_rewards(
             {name: float(value)},
+            drives={name: float(drive)} if drive is not None else None,
             meta=meta,
         )
 
-    def send_local_rewards(self, rewards: Dict[str, float], *, meta: Optional[dict] = None) -> Dict[str, Any]:
-        routed: Dict[str, float] = {}
+    def send_local_rewards(
+        self,
+        rewards: Dict[str, float],
+        *,
+        drives: Optional[Dict[str, float]] = None,
+        meta: Optional[dict] = None,
+    ) -> Dict[str, Any]:
+        routed: Dict[str, Any] = {}
+        drives = dict(drives or {})
 
         for from_output, value in rewards.items():
             bindings = self.reward_map.get_by_output(from_output)
@@ -126,10 +153,24 @@ class RealtimeSession:
             if not bindings:
                 raise KeyError(f"unknown local reward output '{from_output}'")
 
+            # Calculate once per fromOutput, then expand the same value
+            # to every STDP3 layer bound to that fromOutput.
             for binding in bindings:
-               routed[binding.meta["layer"]] = float(value)
+                layer = str(binding.meta["layer"])
+                raw_drive = drives.get(from_output)
 
-        return self.python_client.send_local_rewards(
+                # enforce binary drive {-1, +1}
+                if raw_drive is None:
+                    drive = 1.0
+                else:
+                    drive = 1.0 if float(raw_drive) >= 0.0 else -1.0
+
+                routed[layer] = {
+                    "value": float(value),
+                    "drive": drive,
+                }
+
+        return self.python_client.send_local_rewards_batch(
             compile_id=self.compile_id,
             rewards=routed,
             meta=meta,

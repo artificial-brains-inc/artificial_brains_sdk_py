@@ -35,7 +35,9 @@ class RewardPayload:
     """
 
     global_reward: Optional[float] = None
+    global_drive: Optional[float] = None
     local_rewards: dict[str, float] = field(default_factory=dict)
+    local_drives: dict[str, float] = field(default_factory=dict)
     meta: Optional[dict[str, Any]] = None
 
 
@@ -208,6 +210,7 @@ class RobotLoop:
         if reward.global_reward is not None:
             self.session.send_global_reward(
                 float(reward.global_reward),
+                drive=reward.global_drive,
                 meta=reward.meta,
             )
 
@@ -225,7 +228,11 @@ class RobotLoop:
                 routed[str(from_output)] = float(value)
 
             if routed:
-                self.session.send_local_rewards(routed, meta=reward.meta)
+                self.session.send_local_rewards(
+                    routed,
+                    drives=reward.local_drives,
+                    meta=reward.meta,
+                )
 
     def _start_parallel_inputs(self) -> None:
         if not self.sensor_providers:
@@ -334,7 +341,9 @@ class RobotLoop:
         if isinstance(payload, Mapping):
             return RewardPayload(
                 global_reward=payload.get("global"),
+                global_drive=payload.get("global_drive"),
                 local_rewards=dict(payload.get("local") or {}),
+                local_drives=dict(payload.get("drive") or {}),
                 meta=payload.get("meta"),
             )
 
