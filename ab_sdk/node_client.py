@@ -8,7 +8,7 @@ from . import endpoints
 
 
 class NodeRealtimeClient:
-    def __init__(self, base_url: str, *, api_key: Optional[str] = None, timeout: float = 10.0) -> None:
+    def __init__(self, base_url: str, *, api_key: Optional[str] = None, timeout: float = 20.0) -> None:
         if not base_url:
             raise ValueError("node base_url must be provided")
         self.base_url = base_url.rstrip("/")
@@ -16,7 +16,20 @@ class NodeRealtimeClient:
         if api_key:
             headers["x-api-key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
-        self.http = httpx.Client(base_url=self.base_url, headers=headers, timeout=timeout)
+        self.http = httpx.Client(
+            base_url=self.base_url,
+            headers=headers,
+            timeout=httpx.Timeout(
+                connect=5.0,   # connection setup
+                read=float(timeout),     # waiting for response
+                write=10.0,
+                pool=5.0,
+            ),
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=50,
+            ),
+        )
 
     def initialize(self, project_id: str, **kwargs: Any) -> Dict[str, Any]:
         path = endpoints.NODE_INITIALIZE.format(project_id=project_id)

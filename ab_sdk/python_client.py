@@ -16,7 +16,7 @@ class PythonRealtimeClient:
         *,
         api_key: Optional[str] = None,
         project_id: Optional[str] = None,
-        timeout: float = 10.0,
+        timeout: float = 20.0,
     ) -> None:
         if not base_url:
             raise ValueError("python base_url must be provided")
@@ -27,7 +27,20 @@ class PythonRealtimeClient:
         if api_key:
             headers["x-api-key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
-        self.http = httpx.Client(base_url=self.base_url, headers=headers, timeout=timeout)
+        self.http = httpx.Client(
+            base_url=self.base_url,
+            headers=headers,
+            timeout=httpx.Timeout(
+                connect=5.0,   # connection setup
+                read=float(timeout),     # waiting for response
+                write=10.0,
+                pool=5.0,
+            ),
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=50,
+            ),
+        )
 
     def compile_direct(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import httpx
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -266,8 +267,27 @@ class RobotLoop:
         while self._running:
             started = time.time()
 
-            signal = provider()
-            self._publish_one_input(sensor, signal)
+            try:
+                signal = provider()
+                self._publish_one_input(sensor, signal)
+            except httpx.TimeoutException as exc:
+                print(
+                    f"[AB][INPUT][TIMEOUT] sensor={sensor} error={exc}",
+                    flush=True,
+                )
+            except Exception as exc:
+                if self.strict:
+                    print(
+                        f"[AB][INPUT][ERROR] sensor={sensor} error={exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    raise
+                print(
+                    f"[AB][INPUT][SKIP] sensor={sensor} error={exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             elapsed = time.time() - started
             time.sleep(max(0.0, interval - elapsed))
