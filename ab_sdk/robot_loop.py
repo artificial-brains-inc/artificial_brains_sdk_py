@@ -134,6 +134,7 @@ class RobotLoop:
 
         self._input_buffer: dict[str, dict[str, Any]] = {}
         self._input_lock = threading.Lock()
+        self._input_send_seq = 0
 
         if auto_register_command_handler:
             self.session.on_command(self._handle_command)
@@ -384,7 +385,7 @@ class RobotLoop:
             with self._input_lock:
                 self._input_buffer[encoded.target] = event
         else:
-            self.session.python_client.send_input(
+            self.session.input_client.send_input(
                 payload={
                     "compileId": self.session.compile_id,
                     "events": [event],
@@ -399,6 +400,36 @@ class RobotLoop:
         )
         self._input_flush_thread.start()
 
+    def _send_input_batch_async(self, batch: list[dict[str, Any]]) -> None:
+        try:
+            with self._input_lock:
+                self._input_send_seq += 1
+                seq = self._input_send_seq
+            t0 = time.perf_counter()
+            print(
+                f"[AB][INPUT][SEND_START] seq={seq} t={t0:.6f} events={len(batch)}",
+                flush=True,
+            )
+
+            self.session.input_client.send_input(
+                payload={
+                    "compileId": self.session.compile_id,
+                    "events": batch,
+                }
+            )
+
+            t1 = time.perf_counter()
+            print(
+                f"[AB][INPUT][SEND_DONE] seq={seq} t={t1:.6f} "
+                f"dt_ms={(t1 - t0) * 1000:.2f}",
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(f"[AB][INPUT][SEND_ERROR] {exc}", file=sys.stderr, flush=True)
+
+
+
 
     def _input_flush_worker(self) -> None:
         interval = 1.0 / self.input_hz if self.input_hz > 0 else 0.01
@@ -406,25 +437,18 @@ class RobotLoop:
         while self._running:
             started = time.time()
 
-            batch = list(self._input_buffer.values())
-            self._input_buffer.clear()
+            with self._input_lock:
+                batch = list(self._input_buffer.values())
+                self._input_buffer.clear()
+ 
 
             if batch:
-                payload = {
-                    "compileId": self.session.compile_id,
-                    "events": batch,
-                }
-                print(
-                    f"[AB][INPUT][BATCH_SEND] events={len(batch)} "
-                    f"targets={[ev.get('target') for ev in batch]}",
-                    flush=True,
-                )
-                try:
-                    self.session.python_client.send_input(payload=payload)
-                except Exception as exc:
-                    print(f"[AB][INPUT][BATCH_SEND_ERROR] {exc}", file=sys.stderr, flush=True)
-                    if self.strict:
-                        raise
+                threading.Thread(
+                    target=self._send_input_batch_async,
+                    args=(batch,),
+                    daemon=True,
+                    name=f"ABInputSend:{self.session.compile_id}",
+                ).start()
 
             elapsed = time.time() - started
             time.sleep(max(0.0, interval - elapsed))

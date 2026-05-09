@@ -197,3 +197,11 @@ class PythonRealtimeClient:
             flush=True,
         )
         return payload
+    
+    def clone(self) -> "PythonRealtimeClient":
+        return PythonRealtimeClient(
+            self.base_url,
+            api_key=self.http.headers.get("x-api-key"),
+            project_id=self.http.headers.get("x-project-id"),
+            timeout=20.0,
+        )

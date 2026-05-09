@@ -42,9 +42,13 @@ class RealtimeSession:
         self.reward_map = RewardMap.from_contract(contract)
         self.encoder = SpikeEncoder(self.input_map)
 
+        self.input_client = python_client.clone()
+        self.output_client = python_client.clone()
+        self.reward_client = python_client.clone()
+
         self.decoder: Optional[Any] = None
         self.output_stream = OutputStream(
-            python_client,
+            self.output_client,
             compile_id=compile_id,
             poll_interval=config.poll_interval,
             limit=config.output_limit,
@@ -107,7 +111,7 @@ class RealtimeSession:
             compile_id=self.compile_id,
             encoded=encoded,
         )
-        return self.python_client.send_input(payload=payload)
+        return self.input_client.send_input(payload=payload)
 
     def send_global_reward(
         self,
@@ -121,7 +125,7 @@ class RealtimeSession:
         else:
             drive = max(0.0, min(1.0, float(drive)))
 
-        return self.python_client.send_global_reward(
+        return self.reward_client.send_global_reward(
             compile_id=self.compile_id,
             value=value,
             drive=drive,
@@ -175,7 +179,7 @@ class RealtimeSession:
                     "drive": drive,
                 }
 
-        return self.python_client.send_local_rewards_batch(
+        return self.reward_client.send_local_rewards_batch(
             compile_id=self.compile_id,
             rewards=routed,
             meta=meta,
@@ -385,7 +389,7 @@ class RealtimeSession:
         self,
         layer_rewards: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
-        return self.python_client.send_local_rewards_batch(
+        return self.reward_client.send_local_rewards_batch(
             compile_id=self.compile_id,
             rewards=layer_rewards,
             meta=None,
