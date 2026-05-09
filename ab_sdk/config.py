@@ -71,6 +71,7 @@ class SDKConfig:
     timeout: float = 10.0
     output_poll_interval: float = 0.05
     output_limit: int = 100
+    output_telemetry: bool = False
 
     @classmethod
     def from_env(
@@ -81,6 +82,7 @@ class SDKConfig:
         timeout: Optional[float] = None,
         output_poll_interval: Optional[float] = None,
         output_limit: Optional[int] = None,
+        output_telemetry: Optional[bool] = None,
     ) -> "SDKConfig":
         if env_path is not None:
             load_env_file(Path(env_path))
@@ -104,6 +106,10 @@ class SDKConfig:
 
         if output_limit is None:
             output_limit = int(os.getenv("AB_OUTPUT_LIMIT", "100"))
+        
+        if output_telemetry is None:
+            output_telemetry_env = os.getenv("AB_OUTPUT_TELEMETRY", "0").strip().lower()
+            output_telemetry = output_telemetry_env in {"1", "true", "yes", "on"}
 
         if not project_id:
             raise ValueError("Missing AB_PROJECT_ID.")
@@ -123,4 +129,5 @@ class SDKConfig:
             timeout=timeout,
             output_poll_interval=output_poll_interval,
             output_limit=output_limit,
+            output_telemetry=output_telemetry,
         )

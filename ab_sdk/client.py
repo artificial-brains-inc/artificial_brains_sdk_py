@@ -44,6 +44,7 @@ class ABClient:
         timeout: float = 10.0,
         output_poll_interval: float = 0.05,
         output_limit: int = 100,
+        output_telemetry: bool = False,
     ) -> None:
         api_key = api_key or os.getenv("AB_API_KEY")
         if not api_key:
@@ -58,6 +59,7 @@ class ABClient:
         )
         self.output_poll_interval = output_poll_interval
         self.output_limit = output_limit
+        self.output_telemetry = output_telemetry
 
     @classmethod
     def from_config(cls, config: SDKConfig) -> "ABClient":
@@ -68,6 +70,7 @@ class ABClient:
             timeout=config.timeout,
             output_poll_interval=config.output_poll_interval,
             output_limit=config.output_limit,
+            output_telemetry=config.output_telemetry,
         )
 
     @classmethod
@@ -79,6 +82,7 @@ class ABClient:
         timeout: Optional[float] = None,
         output_poll_interval: Optional[float] = None,
         output_limit: Optional[int] = None,
+        output_telemetry: Optional[bool] = None,
     ) -> "ABClient":
         config = SDKConfig.from_env(
             env_path=env_path,
@@ -86,6 +90,7 @@ class ABClient:
             timeout=timeout,
             output_poll_interval=output_poll_interval,
             output_limit=output_limit,
+            output_telemetry=output_telemetry,
         )
         return cls.from_config(config)
 
@@ -119,6 +124,7 @@ class ABClient:
         *,
         project_id: str,
         telemetry: bool = True,
+        output_telemetry: Optional[bool] = None,
         initialize_kwargs: Optional[Dict[str, Any]] = None,
         run_kwargs: Optional[Dict[str, Any]] = None,
     ) -> RealtimeSession:
@@ -169,6 +175,11 @@ class ABClient:
                 poll_interval=self.output_poll_interval,
                 output_limit=self.output_limit,
                 checkpoint_every_ticks=250,
+                output_telemetry=(
+                    self.output_telemetry
+                    if output_telemetry is None
+                    else bool(output_telemetry)
+                ),
             ),
         )
         session.start_output_stream()
@@ -184,6 +195,7 @@ class ABClient:
         return self.start(
             project_id=config.project_id,
             telemetry=config.telemetry,
+            output_telemetry=config.output_telemetry,
             initialize_kwargs=initialize_kwargs,
             run_kwargs=run_kwargs,
         )
@@ -196,6 +208,7 @@ class ABClient:
         timeout: Optional[float] = None,
         output_poll_interval: Optional[float] = None,
         output_limit: Optional[int] = None,
+        output_telemetry: Optional[bool] = None,
         initialize_kwargs: Optional[Dict[str, Any]] = None,
         run_kwargs: Optional[Dict[str, Any]] = None,
     ) -> RealtimeSession:
@@ -205,6 +218,7 @@ class ABClient:
             timeout=timeout,
             output_poll_interval=output_poll_interval,
             output_limit=output_limit,
+            output_telemetry=output_telemetry,
         )
         return self.start_from_config(
             config,
@@ -252,6 +266,7 @@ class ABClient:
                 telemetry=False,
                 poll_interval=self.output_poll_interval,
                 output_limit=self.output_limit,
+                output_telemetry=False,
             ),
         )
         session.start_output_stream()

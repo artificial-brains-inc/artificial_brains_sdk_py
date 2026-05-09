@@ -16,6 +16,7 @@ class SessionConfig:
     poll_interval: float = 0.05
     output_limit: int = 100
     checkpoint_every_ticks: int = 250
+    output_telemetry: bool = False
 
 
 class RealtimeSession:
@@ -60,6 +61,10 @@ class RealtimeSession:
 
         print(
             f"[AB][CHECKPOINT] enabled every {self._checkpoint_every_steps} output steps",
+            flush=True,
+        )
+        print(
+            f"[AB][OUTPUT_TELEMETRY] enabled={self.config.output_telemetry}",
             flush=True,
         )
 
@@ -112,9 +117,9 @@ class RealtimeSession:
         meta: Optional[dict] = None,
     ) -> Dict[str, Any]:
         if drive is None:
-            drive = 1.0
+            drive = 0.0
         else:
-            drive = 1.0 if float(drive) >= 0.0 else -1.0
+            drive = max(0.0, min(1.0, float(drive)))
 
         return self.python_client.send_global_reward(
             compile_id=self.compile_id,
@@ -188,6 +193,15 @@ class RealtimeSession:
 
         self.python_client.run_stop(self.compile_id)
         self.output_stream.stop()
+        if (
+            self.config.output_telemetry
+            and self.node_client
+            and self.project_id
+        ):
+            try:
+                self.node_client.clear_output_cache(self.project_id, self.compile_id)
+            except Exception as exc:
+                print(f"[AB][OUTPUT_TELEMETRY][CLEAR_ERROR] {exc}", flush=True)
         if notify_node and self.config.telemetry and self.node_client and self.project_id:
             self.node_client.sdk_run_stopped(self.project_id, self.compile_id)
     
@@ -202,11 +216,34 @@ class RealtimeSession:
             print(f"[AB][CHECKPOINT][FINAL][ERROR] {exc}", flush=True)
 
         self.output_stream.stop()
+        if (
+            self.config.output_telemetry
+            and self.node_client
+            and self.project_id
+        ):
+            try:
+                self.node_client.clear_output_cache(self.project_id, self.compile_id)
+            except Exception as exc:
+                print(f"[AB][OUTPUT_TELEMETRY][CLEAR_ERROR] {exc}", flush=True)
+
         if notify_node and self.config.telemetry and self.node_client and self.project_id:
             self.node_client.sdk_run_stopped(self.project_id, self.compile_id)
 
 
     def _dispatch_output(self, item: Dict[str, Any]) -> None:
+        if (
+            self.config.output_telemetry
+            and self.node_client
+            and self.project_id
+        ):
+            try:
+                self.node_client.publish_output(
+                    self.project_id,
+                    self.compile_id,
+                    item,
+                )
+            except Exception as exc:
+                print(f"[AB][OUTPUT_TELEMETRY][ERROR] {exc}", flush=True)
         for handler in list(self._output_handlers):
             handler(item)
 
@@ -311,3 +348,45 @@ class RealtimeSession:
             self.checkpoint(reason="periodic")
         except Exception as exc:
             print(f"[AB][CHECKPOINT][ERROR] {exc}", flush=True)
+
+
+    def route_local_rewards_to_layers(
+        self,
+        rewards: Dict[str, float],
+        *,
+        drives: Optional[Dict[str, float]] = None,
+        meta: Optional[dict] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        routed: Dict[str, Dict[str, Any]] = {}
+        drives = dict(drives or {})
+
+        for from_output, value in rewards.items():
+            bindings = self.reward_map.get_by_output(from_output)
+
+            if not bindings:
+                raise KeyError(f"unknown local reward output '{from_output}'")
+
+            for binding in bindings:
+                layer = str(binding.meta["layer"])
+                raw_drive = drives.get(from_output)
+
+                drive = None if raw_drive is None else float(raw_drive)
+
+                routed[layer] = {
+                    "value": float(value),
+                    "drive": drive,
+                    "meta": meta or {},
+                }
+
+        return routed
+
+
+    def send_layer_rewards_batch(
+        self,
+        layer_rewards: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        return self.python_client.send_local_rewards_batch(
+            compile_id=self.compile_id,
+            rewards=layer_rewards,
+            meta=None,
+        )

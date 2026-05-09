@@ -93,6 +93,21 @@ class NodeRealtimeClient:
         )
         return self._json_or_raise(resp, "checkpoint")
 
+    def publish_output(self, project_id: str, compile_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        path = endpoints.NODE_OUTPUT_TELEMETRY.format(
+            project_id=project_id,
+            compile_id=compile_id,
+        )
+        resp = self.http.post(path, json=payload)
+        return self._json_or_raise(resp, "publish_output")
+
+    def clear_output_cache(self, project_id: str, compile_id: str) -> Dict[str, Any]:
+        path = endpoints.NODE_OUTPUT_TELEMETRY_CLEAR.format(
+            project_id=project_id,
+            compile_id=compile_id,
+        )
+        resp = self.http.post(path, json={"compileId": compile_id})
+        return self._json_or_raise(resp, "clear_output_cache")
 
     @staticmethod
     def _json_or_raise(resp: httpx.Response, op: str) -> Dict[str, Any]:

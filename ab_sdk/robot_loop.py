@@ -96,10 +96,15 @@ class RobotLoop:
         reward_provider: Optional[Callable[[], Any]] = None,
         command_executor: Optional[Callable[[Any], None]] = None,
         tick_hz: float = 20.0,
+        input_hz: float = 100.0,
+        reward_hz: float = 4.0,
         encoder_mode: str = "vector_f32",
         strict: bool = True,
         auto_register_command_handler: bool = True,
         checkpoint_every_ticks: int = 500,
+        exploratory_rewards: bool = False,
+        exploratory_output_ratio: float = 0.5,
+        exploratory_min_abs_delta: float = 0.01,
     ) -> None:
         self.session = session
         self.state_provider = state_provider
@@ -108,18 +113,32 @@ class RobotLoop:
         self.reward_provider = reward_provider
         self.command_executor = command_executor
         self.tick_hz = tick_hz
+        self.input_hz = float(input_hz)
+        self.reward_hz = float(reward_hz)
         self.encoder_mode = encoder_mode
         self.strict = strict
         self.checkpoint_every_ticks = int(checkpoint_every_ticks or 0)
         self._tick_count = 0
+        self.exploratory_rewards = bool(exploratory_rewards)
+        self.exploratory_output_ratio = float(exploratory_output_ratio)
+        self.exploratory_min_abs_delta = float(exploratory_min_abs_delta)
+        self._exploration_complete = False
+        self._pending_layer_rewards: dict[str, dict[str, Any]] = {}
+        self._reward_lock = threading.Lock()
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._input_flush_thread: Optional[threading.Thread] = None
         self._input_threads: list[threading.Thread] = []
         self._reward_thread: Optional[threading.Thread] = None
 
-        if command_executor and auto_register_command_handler:
-            self.session.on_command(command_executor)
+        self._input_buffer: dict[str, dict[str, Any]] = {}
+        self._input_lock = threading.Lock()
+
+        if auto_register_command_handler:
+            self.session.on_command(self._handle_command)
+        
+        self._user_command_executor = command_executor
 
     def start(self) -> None:
         if self._running:
@@ -127,6 +146,7 @@ class RobotLoop:
         self._running = True
         if self.input_mode == "parallel":
             self._start_parallel_inputs()
+            self._start_input_flush_loop()
             self._start_reward_loop()
         else:
             self._thread = threading.Thread(
@@ -147,6 +167,11 @@ class RobotLoop:
             if self._reward_thread is not threading.current_thread():
                 self._reward_thread.join(timeout=2.0)
             self._reward_thread = None
+        
+        if self._input_flush_thread:
+            if self._input_flush_thread is not threading.current_thread():
+                self._input_flush_thread.join(timeout=2.0)
+            self._input_flush_thread = None
             
         if self._thread:
             if self._thread is not threading.current_thread():
@@ -206,6 +231,8 @@ class RobotLoop:
             return
 
         reward = self._normalize_reward_payload(raw)
+        reward = self._apply_exploratory_reward_gate(reward)
+ 
 
         if reward.global_reward is not None:
             self.session.send_global_reward(
@@ -228,11 +255,15 @@ class RobotLoop:
                 routed[str(from_output)] = float(value)
 
             if routed:
-                self.session.send_local_rewards(
+                layer_rewards = self.session.route_local_rewards_to_layers(
                     routed,
                     drives=reward.local_drives,
                     meta=reward.meta,
                 )
+
+                with self._reward_lock:
+                    # overwrite: one latest reward per layer
+                    self._pending_layer_rewards.update(layer_rewards)
 
     def _start_parallel_inputs(self) -> None:
         if not self.sensor_providers:
@@ -269,7 +300,7 @@ class RobotLoop:
 
 
     def _sensor_worker(self, sensor: str, provider: Callable[[], Any]) -> None:
-        interval = 1.0 / self.tick_hz if self.tick_hz > 0 else 0.05
+        interval = 1.0 / self.input_hz if self.input_hz > 0 else 0.01
 
         while self._running:
             started = time.time()
@@ -301,12 +332,19 @@ class RobotLoop:
 
 
     def _reward_worker(self) -> None:
-        interval = 1.0 / self.tick_hz if self.tick_hz > 0 else 0.05
+        interval = 1.0 / self.reward_hz if self.reward_hz > 0 else 0.25
 
         while self._running:
             started = time.time()
 
             self._publish_rewards()
+
+            with self._reward_lock:
+                layer_rewards = dict(self._pending_layer_rewards)
+                self._pending_layer_rewards.clear()
+
+            if layer_rewards:
+                self.session.send_layer_rewards_batch(layer_rewards)
 
             elapsed = time.time() - started
             time.sleep(max(0.0, interval - elapsed))
@@ -319,7 +357,7 @@ class RobotLoop:
             return
 
         if isinstance(signal, Mapping):
-            self.session.publish_input(
+            encoded = self.session.encoder.encode(
                 sensor,
                 signal.get("signal"),
                 mode=signal.get("mode", self.encoder_mode),
@@ -330,7 +368,66 @@ class RobotLoop:
                 meta=signal.get("meta"),
             )
         else:
-            self.session.publish_input(sensor, signal, mode=self.encoder_mode)
+            encoded = self.session.encoder.encode(
+                sensor,
+                signal,
+                mode=self.encoder_mode,
+            )
+
+        event = {
+            "target": encoded.target,
+            "payload": encoded.payload,
+            "meta": encoded.meta,
+        }
+
+        if self.input_mode == "parallel":
+            with self._input_lock:
+                self._input_buffer[encoded.target] = event
+        else:
+            self.session.python_client.send_input(
+                payload={
+                    "compileId": self.session.compile_id,
+                    "events": [event],
+                }
+            )
+    
+    def _start_input_flush_loop(self) -> None:
+        self._input_flush_thread = threading.Thread(
+            target=self._input_flush_worker,
+            daemon=True,
+            name=f"ABInputFlush:{self.session.compile_id}",
+        )
+        self._input_flush_thread.start()
+
+
+    def _input_flush_worker(self) -> None:
+        interval = 1.0 / self.input_hz if self.input_hz > 0 else 0.01
+
+        while self._running:
+            started = time.time()
+
+            batch = list(self._input_buffer.values())
+            self._input_buffer.clear()
+
+            if batch:
+                payload = {
+                    "compileId": self.session.compile_id,
+                    "events": batch,
+                }
+                print(
+                    f"[AB][INPUT][BATCH_SEND] events={len(batch)} "
+                    f"targets={[ev.get('target') for ev in batch]}",
+                    flush=True,
+                )
+                try:
+                    self.session.python_client.send_input(payload=payload)
+                except Exception as exc:
+                    print(f"[AB][INPUT][BATCH_SEND_ERROR] {exc}", file=sys.stderr, flush=True)
+                    if self.strict:
+                        raise
+
+            elapsed = time.time() - started
+            time.sleep(max(0.0, interval - elapsed))
 
 
     @staticmethod
@@ -350,4 +447,71 @@ class RobotLoop:
         raise TypeError(
             "reward_provider must return None, RewardPayload, or a mapping "
             "with keys: global, local, meta"
+        )
+    
+    def _handle_command(self, command: Any) -> None:
+        self._update_exploration_from_command(command)
+
+        if self._user_command_executor is not None:
+            self._user_command_executor(command)
+
+    def _update_exploration_from_command(self, command: Any) -> None:
+        if not self.exploratory_rewards or self._exploration_complete:
+            return
+
+        deltas = {}
+        if isinstance(command, Mapping):
+            maybe_deltas = command.get("deltas")
+            if isinstance(maybe_deltas, Mapping):
+                deltas = maybe_deltas
+
+        if not deltas:
+            return
+
+        total = max(1, len(self.session.output_map.by_output_id))
+        if total <= 0:
+            return
+
+        active = sum(
+            1
+            for value in deltas.values()
+            if abs(float(value)) >= self.exploratory_min_abs_delta
+        )
+
+        ratio = active / float(total)
+
+        if ratio >= self.exploratory_output_ratio:
+            self._exploration_complete = True
+            print(
+                "[AB][EXPLORATION] complete",
+                {
+                    "active": active,
+                    "total": total,
+                    "ratio": ratio,
+                },
+                flush=True,
+            )
+
+    def _apply_exploratory_reward_gate(self, reward: RewardPayload) -> RewardPayload:
+        if not self.exploratory_rewards or self._exploration_complete:
+            return reward
+
+        local_rewards = {
+            str(k): 1.0
+            for k in reward.local_rewards.keys()
+        }
+
+        meta = dict(reward.meta or {})
+        meta["exploratory_rewards"] = True
+        meta["exploration_complete"] = False
+
+        return RewardPayload(
+            global_reward=1.0 if reward.global_reward is not None else None,
+            global_drive=1.0,
+            local_rewards=local_rewards,
+            local_drives={
+                str(k): 1.0
+                for k in reward.local_rewards.keys()
+            },
+            meta=meta,
         )
