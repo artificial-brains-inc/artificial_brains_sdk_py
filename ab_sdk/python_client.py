@@ -38,7 +38,7 @@ class PythonRealtimeClient:
             ),
             limits=httpx.Limits(
                 max_connections=100,
-                max_keepalive_connections=50,
+                max_keepalive_connections=80,
             ),
         )
 

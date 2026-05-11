@@ -99,6 +99,26 @@ class NodeRealtimeClient:
             compile_id=compile_id,
         )
         resp = self.http.post(path, json=payload)
+        print(
+            "[AB][NODE][OUTPUT_TELEMETRY] POST",
+            {
+                "base_url": self.base_url,
+                "path": path,
+                "projectId": project_id,
+                "compileId": compile_id,
+                "step": payload.get("step"),
+            },
+            flush=True,
+        )
+        resp = self.http.post(path, json=payload)
+        print(
+            "[AB][NODE][OUTPUT_TELEMETRY] RESPONSE",
+            {
+                "status": resp.status_code,
+                "body": resp.text[:500],
+            },
+            flush=True,
+        )
         return self._json_or_raise(resp, "publish_output")
 
     def clear_output_cache(self, project_id: str, compile_id: str) -> Dict[str, Any]:

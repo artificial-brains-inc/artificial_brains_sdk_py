@@ -97,7 +97,7 @@ class RobotLoop:
         command_executor: Optional[Callable[[Any], None]] = None,
         tick_hz: float = 20.0,
         input_hz: float = 100.0,
-        reward_hz: float = 4.0,
+        reward_hz: float = 20.0,
         encoder_mode: str = "vector_f32",
         strict: bool = True,
         auto_register_command_handler: bool = True,
@@ -338,17 +338,62 @@ class RobotLoop:
         while self._running:
             started = time.time()
 
-            self._publish_rewards()
-
-            with self._reward_lock:
-                layer_rewards = dict(self._pending_layer_rewards)
-                self._pending_layer_rewards.clear()
-
-            if layer_rewards:
-                self.session.send_layer_rewards_batch(layer_rewards)
+            try:
+                self._publish_reward_cycle()
+            except httpx.TimeoutException as exc:
+                print(f"[AB][REWARD][TIMEOUT] {type(exc).__name__}: {exc}", flush=True)
+            except Exception as exc:
+                print(f"[AB][REWARD][SEND_ERROR] {type(exc).__name__}: {exc}", flush=True)
 
             elapsed = time.time() - started
             time.sleep(max(0.0, interval - elapsed))
+
+    def _publish_reward_cycle(self) -> None:
+        if self.reward_provider is None:
+            return
+
+        raw = self.reward_provider()
+        if raw is None:
+            return
+
+        reward = self._normalize_reward_payload(raw)
+        reward = self._apply_exploratory_reward_gate(reward)
+
+        layer_rewards: dict[str, dict[str, Any]] = {}
+
+        if reward.local_rewards:
+            routed: dict[str, float] = {}
+
+            for from_output, value in reward.local_rewards.items():
+                bindings = self.session.reward_map.get_by_output(from_output)
+
+                if not bindings:
+                    if self.strict:
+                        raise KeyError(f"unknown local reward output '{from_output}'")
+                    continue
+
+                routed[str(from_output)] = float(value)
+
+            if routed:
+                layer_rewards = self.session.route_local_rewards_to_layers(
+                    routed,
+                    drives=reward.local_drives,
+                    meta=reward.meta,
+                )
+
+        # One reward cycle:
+        # 1. global reward/modulatory signal
+        # 2. local layer rewards immediately after
+        if reward.global_reward is not None:
+            self.session.send_global_reward(
+                float(reward.global_reward),
+                drive=reward.global_drive,
+                meta=reward.meta,
+            )
+
+        if layer_rewards:
+            self.session.send_layer_rewards_batch(layer_rewards)
+
 
 
     def _publish_one_input(self, sensor: str, signal: Any) -> None:

@@ -11,6 +11,7 @@ NODE_CHECKPOINT = "/robots/realtime/{project_id}/checkpoint"
 NODE_OUTPUT_TELEMETRY = "/robots/realtime/{project_id}/outputs/{compile_id}"
 NODE_OUTPUT_TELEMETRY_CLEAR = "/robots/realtime/{project_id}/outputs/{compile_id}/clear"
 
+
 # Python runtime
 PY_COMPILE = "/compile"
 PY_RUN_START = "/run/start"

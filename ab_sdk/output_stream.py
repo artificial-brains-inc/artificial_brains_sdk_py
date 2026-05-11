@@ -57,11 +57,19 @@ class OutputStream:
 
     def _worker(self) -> None:
         while self._running:
-            payload = self.python_client.get_outputs(
-                compile_id=self.compile_id,
-                after_step=self.after_step,
-                limit=self.limit,
-            )
+            try:
+                payload = self.python_client.get_outputs(
+                    compile_id=self.compile_id,
+                    after_step=self.after_step,
+                    limit=self.limit,
+                )
+            except Exception as exc:
+                print(
+                    f"[AB][OUTPUT][STREAM_ERROR] {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                time.sleep(self.poll_interval)
+                continue
 
             # CONTROL CHANNEL TO STOP STREAM
             control = payload.get("control")
